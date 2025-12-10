@@ -1,9 +1,6 @@
 /**
  * LSP Hook for pi-coding-agent
- * 
- * Provides Language Server Protocol integration for diagnostics feedback.
- * After file writes/edits, automatically fetches LSP diagnostics and appends
- * them to the tool result so the agent can fix errors.
+ * Provides diagnostics feedback after file writes/edits.
  */
 
 import type { HookAPI } from "@mariozechner/pi-coding-agent/hooks";
@@ -19,43 +16,32 @@ import {
 import type { Diagnostic } from "vscode-languageserver-types";
 
 // ============================================================================
-// Configuration
+// Config & Types
 // ============================================================================
 
-const DIAGNOSTICS_WAIT_MS = 3000; // Wait for LSP diagnostics
-const INIT_TIMEOUT_MS = 30000;
+const DIAG_TIMEOUT = 3000,
+  INIT_TIMEOUT = 30000,
+  MAX_OPEN = 50;
+const DEBUG = process.env.PI_LSP_DEBUG === "1";
+const debug = (...a: unknown[]) => DEBUG && console.error("[LSP]", ...a);
 
-// ============================================================================
-// Types
-// ============================================================================
-
-interface LSPServerConfig {
+interface ServerConfig {
   id: string;
-  extensions: string[];
-  findRoot: (file: string, cwd: string) => Promise<string | undefined>;
-  spawn: (root: string) => Promise<LSPHandle | undefined>;
+  ext: string[];
+  markers: string[];
+  cmd: (root: string) => { bin: string; args: string[] } | undefined;
+  skip?: (file: string, cwd: string) => boolean;
 }
 
-interface LSPHandle {
-  process: ChildProcessWithoutNullStreams;
-  initializationOptions?: Record<string, unknown>;
+interface Client {
+  conn: MessageConnection;
+  proc: ChildProcessWithoutNullStreams;
+  diags: Map<string, Diagnostic[]>;
+  files: Map<string, { ver: number; ts: number }>;
+  waiters: Map<string, Array<() => void>>;
 }
 
-interface LSPClient {
-  serverId: string;
-  root: string;
-  connection: MessageConnection;
-  process: ChildProcessWithoutNullStreams;
-  diagnostics: Map<string, Diagnostic[]>;
-  openFiles: Map<string, number>;
-  diagnosticsListeners: Map<string, Array<() => void>>;
-}
-
-// ============================================================================
-// Language IDs
-// ============================================================================
-
-const LANGUAGE_IDS: Record<string, string> = {
+const LANG: Record<string, string> = {
   ".dart": "dart",
   ".ts": "typescript",
   ".tsx": "typescriptreact",
@@ -67,544 +53,425 @@ const LANGUAGE_IDS: Record<string, string> = {
   ".cts": "typescript",
   ".vue": "vue",
   ".svelte": "svelte",
-  ".astro": "astro",
   ".py": "python",
   ".pyi": "python",
   ".go": "go",
   ".rs": "rust",
-  ".html": "html",
-  ".css": "css",
-  ".scss": "scss",
-  ".json": "json",
-  ".yaml": "yaml",
-  ".yml": "yaml",
 };
 
 // ============================================================================
 // Utilities
 // ============================================================================
 
+const HOME = process.env.HOME || "";
+const PATHS = [
+  ...(process.env.PATH?.split(path.delimiter) || []),
+  "/usr/local/bin",
+  "/opt/homebrew/bin",
+  `${HOME}/.pub-cache/bin`,
+  `${HOME}/fvm/default/bin`,
+  `${HOME}/go/bin`,
+  `${HOME}/.cargo/bin`,
+];
+
 function which(cmd: string): string | undefined {
-  const envPath = process.env.PATH || "";
-  const paths = envPath.split(path.delimiter);
   const ext = process.platform === "win32" ? ".exe" : "";
-
-  for (const p of paths) {
-    const full = path.join(p, cmd + ext);
+  for (const p of PATHS) {
+    const f = path.join(p, cmd + ext);
     try {
-      if (fs.existsSync(full) && fs.statSync(full).isFile()) return full;
-    } catch { /* ignore */ }
+      if (fs.statSync(f).isFile()) return f;
+    } catch {}
   }
+}
 
-  const commonPaths = [
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    path.join(process.env.HOME || "", ".pub-cache/bin"),
-    path.join(process.env.HOME || "", "fvm/default/bin"),
-    path.join(process.env.HOME || "", "go/bin"),
-    path.join(process.env.HOME || "", ".cargo/bin"),
-  ];
-
-  for (const p of commonPaths) {
-    const full = path.join(p, cmd + ext);
-    try {
-      if (fs.existsSync(full) && fs.statSync(full).isFile()) return full;
-    } catch { /* ignore */ }
+function findUp(
+  start: string,
+  targets: string[],
+  stop: string,
+): string | undefined {
+  for (
+    let d = path.resolve(start);
+    d.length >= stop.length;
+    d = path.dirname(d)
+  ) {
+    for (const t of targets)
+      if (fs.existsSync(path.join(d, t))) return path.join(d, t);
+    if (d === path.dirname(d)) break;
   }
-
-  return undefined;
 }
 
-async function findNearestFile(startDir: string, targets: string[], stopDir: string): Promise<string | undefined> {
-  let current = path.resolve(startDir);
-  const stop = path.resolve(stopDir);
-
-  while (current.length >= stop.length) {
-    for (const target of targets) {
-      const candidate = path.join(current, target);
-      try {
-        if (fs.existsSync(candidate)) return candidate;
-      } catch { /* ignore */ }
-    }
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return undefined;
+function findRoot(file: string, cwd: string, markers: string[]): string {
+  const f = findUp(path.dirname(file), markers, cwd);
+  return f ? path.dirname(f) : cwd;
 }
 
-async function findRoot(file: string, cwd: string, markers: string[]): Promise<string | undefined> {
-  const found = await findNearestFile(path.dirname(file), markers, cwd);
-  return found ? path.dirname(found) : cwd;
+function timeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, rej) => setTimeout(() => rej(new Error(msg)), ms)),
+  ]);
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, name: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${name} timed out after ${ms}ms`)), ms);
-    promise.then((r) => { clearTimeout(timer); resolve(r); }).catch((e) => { clearTimeout(timer); reject(e); });
-  });
-}
+const fmtDiag = (d: Diagnostic) =>
+  `${["", "ERROR", "WARN", "INFO", "HINT"][d.severity || 1]} [${d.range.start.line + 1}:${d.range.start.character + 1}] ${d.message}`;
 
 // ============================================================================
-// Diagnostic Formatting
+// Server Configs
 // ============================================================================
 
-function prettyDiagnostic(d: Diagnostic): string {
-  const severityMap: Record<number, string> = { 1: "ERROR", 2: "WARN", 3: "INFO", 4: "HINT" };
-  const severity = severityMap[d.severity || 1];
-  const line = d.range.start.line + 1;
-  const col = d.range.start.character + 1;
-  return `${severity} [${line}:${col}] ${d.message}`;
-}
+const simple =
+  (bin: string, args: string[] = ["--stdio"]) =>
+  () => {
+    const b = which(bin);
+    return b ? { bin: b, args } : undefined;
+  };
 
-// ============================================================================
-// LSP Server Configurations
-// ============================================================================
-
-const LSP_SERVERS: LSPServerConfig[] = [
-  // Dart/Flutter
+const SERVERS: ServerConfig[] = [
   {
     id: "dart",
-    extensions: [".dart"],
-    findRoot: async (file, cwd) => findRoot(file, cwd, ["pubspec.yaml", "analysis_options.yaml"]),
-    spawn: async (root) => {
-      let dartBin = which("dart");
-      
-      // Check for Flutter project
-      const pubspecPath = path.join(root, "pubspec.yaml");
-      if (fs.existsSync(pubspecPath)) {
-        try {
-          const content = fs.readFileSync(pubspecPath, "utf-8");
-          if (content.includes("flutter:") || content.includes("sdk: flutter")) {
-            const flutterBin = which("flutter");
-            if (flutterBin) {
-              const flutterDir = path.dirname(fs.realpathSync(flutterBin));
-              for (const p of [
-                path.join(flutterDir, "cache", "dart-sdk", "bin", "dart"),
-                path.join(flutterDir, "..", "cache", "dart-sdk", "bin", "dart"),
-              ]) {
-                if (fs.existsSync(p)) { dartBin = p; break; }
+    ext: [".dart"],
+    markers: ["pubspec.yaml", "analysis_options.yaml"],
+    cmd: (root) => {
+      let dart = which("dart");
+      const pubspec = path.join(root, "pubspec.yaml");
+      if (fs.existsSync(pubspec)) {
+        const c = fs.readFileSync(pubspec, "utf-8");
+        if (c.includes("flutter:") || c.includes("sdk: flutter")) {
+          const fl = which("flutter");
+          if (fl) {
+            const dir = path.dirname(fs.realpathSync(fl));
+            for (const p of [
+              "cache/dart-sdk/bin/dart",
+              "../cache/dart-sdk/bin/dart",
+            ]) {
+              const x = path.join(dir, p);
+              if (fs.existsSync(x)) {
+                dart = x;
+                break;
               }
             }
           }
-        } catch { /* ignore */ }
+        }
       }
-
-      if (!dartBin) return undefined;
-
-      return {
-        process: spawn(dartBin, ["language-server", "--protocol=lsp"], {
-          cwd: root,
-          stdio: ["pipe", "pipe", "pipe"],
-        }),
-      };
+      return dart
+        ? { bin: dart, args: ["language-server", "--protocol=lsp"] }
+        : undefined;
     },
   },
-
-  // TypeScript/JavaScript
   {
-    id: "typescript",
-    extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
-    findRoot: async (file, cwd) => {
-      const denoConfig = await findNearestFile(path.dirname(file), ["deno.json", "deno.jsonc"], cwd);
-      if (denoConfig) return undefined;
-      return findRoot(file, cwd, ["package.json", "tsconfig.json", "jsconfig.json"]);
-    },
-    spawn: async (root) => {
-      const localBin = path.join(root, "node_modules", ".bin", "typescript-language-server");
-      const cmd = fs.existsSync(localBin) ? localBin : which("typescript-language-server");
-      if (!cmd) return undefined;
-      return { process: spawn(cmd, ["--stdio"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] }) };
+    id: "ts",
+    ext: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
+    markers: ["package.json", "tsconfig.json", "jsconfig.json"],
+    skip: (f, cwd) =>
+      !!findUp(path.dirname(f), ["deno.json", "deno.jsonc"], cwd),
+    cmd: (root) => {
+      const local = path.join(
+        root,
+        "node_modules/.bin/typescript-language-server",
+      );
+      const bin = fs.existsSync(local)
+        ? local
+        : which("typescript-language-server");
+      return bin ? { bin, args: ["--stdio"] } : undefined;
     },
   },
-
-  // Vue
   {
     id: "vue",
-    extensions: [".vue"],
-    findRoot: async (file, cwd) => findRoot(file, cwd, ["package.json", "vite.config.ts", "vite.config.js"]),
-    spawn: async (root) => {
-      const cmd = which("vue-language-server");
-      if (!cmd) return undefined;
-      return { process: spawn(cmd, ["--stdio"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] }) };
-    },
+    ext: [".vue"],
+    markers: ["package.json"],
+    cmd: simple("vue-language-server"),
   },
-
-  // Svelte
   {
     id: "svelte",
-    extensions: [".svelte"],
-    findRoot: async (file, cwd) => findRoot(file, cwd, ["package.json", "svelte.config.js"]),
-    spawn: async (root) => {
-      const cmd = which("svelteserver");
-      if (!cmd) return undefined;
-      return { process: spawn(cmd, ["--stdio"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] }) };
-    },
+    ext: [".svelte"],
+    markers: ["package.json"],
+    cmd: simple("svelteserver"),
   },
-
-  // Python
   {
     id: "pyright",
-    extensions: [".py", ".pyi"],
-    findRoot: async (file, cwd) => findRoot(file, cwd, ["pyproject.toml", "setup.py", "requirements.txt", "pyrightconfig.json"]),
-    spawn: async (root) => {
-      const cmd = which("pyright-langserver");
-      if (!cmd) return undefined;
-      return { process: spawn(cmd, ["--stdio"], { cwd: root, stdio: ["pipe", "pipe", "pipe"] }) };
-    },
+    ext: [".py", ".pyi"],
+    markers: ["pyproject.toml", "setup.py", "requirements.txt"],
+    cmd: simple("pyright-langserver"),
   },
-
-  // Go
   {
     id: "gopls",
-    extensions: [".go"],
-    findRoot: async (file, cwd) => {
-      const workRoot = await findRoot(file, cwd, ["go.work"]);
-      if (workRoot !== cwd) return workRoot;
-      return findRoot(file, cwd, ["go.mod"]);
-    },
-    spawn: async (root) => {
-      const cmd = which("gopls");
-      if (!cmd) return undefined;
-      return { process: spawn(cmd, [], { cwd: root, stdio: ["pipe", "pipe", "pipe"] }) };
-    },
+    ext: [".go"],
+    markers: ["go.work", "go.mod"],
+    cmd: simple("gopls", []),
   },
-
-  // Rust
   {
-    id: "rust-analyzer",
-    extensions: [".rs"],
-    findRoot: async (file, cwd) => findRoot(file, cwd, ["Cargo.toml"]),
-    spawn: async (root) => {
-      const cmd = which("rust-analyzer");
-      if (!cmd) return undefined;
-      return { process: spawn(cmd, [], { cwd: root, stdio: ["pipe", "pipe", "pipe"] }) };
-    },
+    id: "rust",
+    ext: [".rs"],
+    markers: ["Cargo.toml"],
+    cmd: simple("rust-analyzer", []),
   },
 ];
+
+// Extension -> config lookup
+const EXT_CFG = new Map<string, ServerConfig>();
+for (const s of SERVERS) for (const e of s.ext) EXT_CFG.set(e, s);
 
 // ============================================================================
 // LSP Manager
 // ============================================================================
 
 class LSPManager {
-  private clients: Map<string, LSPClient> = new Map();
-  private spawning: Map<string, Promise<LSPClient | undefined>> = new Map();
-  private broken: Set<string> = new Set();
-  private cwd: string;
+  private clients = new Map<string, Client>();
+  private pending = new Map<string, Promise<Client | undefined>>();
+  private broken = new Set<string>();
 
-  constructor(cwd: string) {
-    this.cwd = cwd;
-  }
+  constructor(private cwd: string) {}
 
-  private getClientKey(serverId: string, root: string): string {
-    return `${serverId}:${root}`;
-  }
-
-  private async initializeClient(config: LSPServerConfig, root: string): Promise<LSPClient | undefined> {
-    const key = this.getClientKey(config.id, root);
-
+  private async create(
+    cfg: ServerConfig,
+    root: string,
+  ): Promise<Client | undefined> {
+    const key = `${cfg.id}:${root}`;
     try {
-      const handle = await config.spawn(root);
-      if (!handle) {
+      const c = cfg.cmd(root);
+      if (!c) {
         this.broken.add(key);
-        return undefined;
+        return;
       }
 
-      const connection = createMessageConnection(
-        new StreamMessageReader(handle.process.stdout!),
-        new StreamMessageWriter(handle.process.stdin!)
+      debug(`Spawn ${cfg.id}: ${c.bin}`);
+      const proc = spawn(c.bin, c.args, {
+        cwd: root,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const conn = createMessageConnection(
+        new StreamMessageReader(proc.stdout!),
+        new StreamMessageWriter(proc.stdin!),
       );
 
-      const client: LSPClient = {
-        serverId: config.id,
-        root,
-        connection,
-        process: handle.process,
-        diagnostics: new Map(),
-        openFiles: new Map(),
-        diagnosticsListeners: new Map(),
+      const client: Client = {
+        conn,
+        proc,
+        diags: new Map(),
+        files: new Map(),
+        waiters: new Map(),
       };
 
-      connection.onNotification("textDocument/publishDiagnostics", (params: { uri: string; diagnostics: Diagnostic[] }) => {
-        const filePath = decodeURIComponent(new URL(params.uri).pathname);
-        client.diagnostics.set(filePath, params.diagnostics);
+      conn.onNotification(
+        "textDocument/publishDiagnostics",
+        (p: { uri: string; diagnostics: Diagnostic[] }) => {
+          const f = decodeURIComponent(new URL(p.uri).pathname);
+          client.diags.set(f, p.diagnostics);
+          client.waiters.get(f)?.forEach((r) => r());
+          client.waiters.delete(f);
+        },
+      );
 
-        const listeners = client.diagnosticsListeners.get(filePath);
-        if (listeners) {
-          for (const listener of listeners) listener();
-          client.diagnosticsListeners.delete(filePath);
-        }
-      });
+      conn.onRequest("workspace/configuration", () => [{}]);
+      conn.onRequest("window/workDoneProgress/create", () => null);
+      conn.onRequest("client/registerCapability", () => {});
+      conn.onRequest("client/unregisterCapability", () => {});
+      conn.onRequest("workspace/workspaceFolders", () => [
+        { name: "ws", uri: `file://${root}` },
+      ]);
 
-      connection.onRequest("workspace/configuration", () => [handle.initializationOptions ?? {}]);
-      connection.onRequest("window/workDoneProgress/create", () => null);
-      connection.onRequest("client/registerCapability", () => {});
-      connection.onRequest("client/unregisterCapability", () => {});
-      connection.onRequest("workspace/workspaceFolders", () => [{ name: "workspace", uri: `file://${root}` }]);
-
-      handle.process.on("exit", () => {
-        this.clients.delete(key);
-      });
-
-      handle.process.on("error", () => {
+      proc.on("exit", () => this.clients.delete(key));
+      proc.on("error", () => {
         this.clients.delete(key);
         this.broken.add(key);
       });
 
-      connection.listen();
+      conn.listen();
 
-      await withTimeout(
-        connection.sendRequest("initialize", {
+      const ws = [{ name: "ws", uri: `file://${root}` }];
+      await timeout(
+        conn.sendRequest("initialize", {
           rootUri: `file://${root}`,
           processId: process.pid,
-          workspaceFolders: [{ name: "workspace", uri: `file://${root}` }],
-          initializationOptions: handle.initializationOptions ?? {},
+          workspaceFolders: ws,
           capabilities: {
             window: { workDoneProgress: true },
             workspace: { configuration: true, workspaceFolders: true },
             textDocument: {
-              synchronization: { didOpen: true, didChange: true, didClose: true },
+              synchronization: {
+                didOpen: true,
+                didChange: true,
+                didClose: true,
+              },
               publishDiagnostics: { versionSupport: true },
             },
           },
         }),
-        INIT_TIMEOUT_MS,
-        `${config.id} initialize`
+        INIT_TIMEOUT,
+        `${cfg.id} init timeout`,
       );
 
-      await connection.sendNotification("initialized", {});
-
-      if (handle.initializationOptions) {
-        await connection.sendNotification("workspace/didChangeConfiguration", {
-          settings: handle.initializationOptions,
-        });
-      }
-
+      conn.sendNotification("initialized", {});
+      debug(`${cfg.id} ready at ${root}`);
       return client;
-    } catch {
+    } catch (e) {
+      debug(`Create ${cfg.id} failed:`, e);
       this.broken.add(key);
-      return undefined;
     }
   }
 
-  async getClientsForFile(filePath: string): Promise<LSPClient[]> {
-    const ext = path.extname(filePath);
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.cwd, filePath);
-    const clients: LSPClient[] = [];
+  private async getClient(file: string): Promise<Client | undefined> {
+    const cfg = EXT_CFG.get(path.extname(file));
+    if (!cfg) return;
 
-    for (const config of LSP_SERVERS) {
-      if (!config.extensions.includes(ext)) continue;
+    const abs = path.isAbsolute(file) ? file : path.resolve(this.cwd, file);
+    if (cfg.skip?.(abs, this.cwd)) return;
 
-      const root = await config.findRoot(absPath, this.cwd);
-      if (!root) continue;
+    const root = findRoot(abs, this.cwd, cfg.markers);
+    const key = `${cfg.id}:${root}`;
 
-      const key = this.getClientKey(config.id, root);
-      if (this.broken.has(key)) continue;
+    if (this.broken.has(key)) return;
+    if (this.clients.has(key)) return this.clients.get(key);
 
-      const existing = this.clients.get(key);
-      if (existing) {
-        clients.push(existing);
-        continue;
-      }
-
-      let inflightPromise = this.spawning.get(key);
-      if (!inflightPromise) {
-        inflightPromise = this.initializeClient(config, root);
-        this.spawning.set(key, inflightPromise);
-        inflightPromise.finally(() => this.spawning.delete(key));
-      }
-
-      const client = await inflightPromise;
-      if (client) {
-        this.clients.set(key, client);
-        clients.push(client);
-      }
+    if (!this.pending.has(key)) {
+      const p = this.create(cfg, root);
+      this.pending.set(key, p);
+      p.finally(() => this.pending.delete(key));
     }
 
-    return clients;
+    const client = await this.pending.get(key);
+    if (client) this.clients.set(key, client);
+    return client;
   }
 
-  async touchFileAndWait(filePath: string, timeoutMs: number): Promise<Diagnostic[]> {
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.cwd, filePath);
+  private prune(c: Client) {
+    if (c.files.size <= MAX_OPEN) return;
+    const sorted = Array.from(c.files.entries()).sort(
+      (a, b) => a[1].ts - b[1].ts,
+    );
+    for (const [f] of sorted.slice(0, sorted.length - MAX_OPEN)) {
+      try {
+        c.conn.sendNotification("textDocument/didClose", {
+          textDocument: { uri: `file://${f}` },
+        });
+      } catch {}
+      c.files.delete(f);
+      c.diags.delete(f);
+    }
+  }
 
-    const clients = await this.getClientsForFile(absPath);
-    if (clients.length === 0) return [];
-
-    const uri = `file://${absPath}`;
-    const ext = path.extname(filePath);
-    const languageId = LANGUAGE_IDS[ext] || "plaintext";
+  async getDiagnostics(file: string, ms: number): Promise<Diagnostic[]> {
+    const abs = path.isAbsolute(file) ? file : path.resolve(this.cwd, file);
+    const client = await this.getClient(abs);
+    if (!client) return [];
 
     let content: string;
     try {
-      content = fs.readFileSync(absPath, "utf-8");
+      content = fs.readFileSync(abs, "utf-8");
     } catch {
       return [];
     }
 
-    // Set up listeners for diagnostics
-    const diagnosticsPromises: Promise<void>[] = [];
+    const uri = `file://${abs}`,
+      lang = LANG[path.extname(file)] || "plaintext",
+      now = Date.now();
+    client.diags.delete(abs);
 
-    for (const client of clients) {
-      const version = client.openFiles.get(absPath);
-
-      // Create promise that resolves when diagnostics arrive or timeout
-      const diagnosticsPromise = new Promise<void>((resolve) => {
-        const timeoutId = setTimeout(resolve, timeoutMs);
-        
-        const listeners = client.diagnosticsListeners.get(absPath) || [];
-        listeners.push(() => {
-          clearTimeout(timeoutId);
-          resolve();
-        });
-        client.diagnosticsListeners.set(absPath, listeners);
+    // Set up waiter BEFORE notification (avoid race)
+    const wait = new Promise<void>((res) => {
+      const t = setTimeout(res, ms);
+      const w = client.waiters.get(abs) || [];
+      w.push(() => {
+        clearTimeout(t);
+        res();
       });
-      diagnosticsPromises.push(diagnosticsPromise);
+      client.waiters.set(abs, w);
+    });
 
-      try {
-        if (version !== undefined) {
-          const newVersion = version + 1;
-          client.openFiles.set(absPath, newVersion);
-          client.diagnostics.delete(absPath);
-          await client.connection.sendNotification("textDocument/didChange", {
-            textDocument: { uri, version: newVersion },
-            contentChanges: [{ text: content }],
-          });
-        } else {
-          client.openFiles.set(absPath, 0);
-          client.diagnostics.delete(absPath);
-          await client.connection.sendNotification("textDocument/didOpen", {
-            textDocument: { uri, languageId, version: 0, text: content },
-          });
-        }
-      } catch {
-        // Ignore errors
+    try {
+      const info = client.files.get(abs);
+      if (info) {
+        info.ver++;
+        info.ts = now;
+        await client.conn.sendNotification("textDocument/didChange", {
+          textDocument: { uri, version: info.ver },
+          contentChanges: [{ text: content }],
+        });
+      } else {
+        client.files.set(abs, { ver: 0, ts: now });
+        await client.conn.sendNotification("textDocument/didOpen", {
+          textDocument: { uri, languageId: lang, version: 0, text: content },
+        });
+        this.prune(client);
       }
+    } catch {
+      return [];
     }
 
-    // Wait for diagnostics (or timeout)
-    await Promise.all(diagnosticsPromises);
-
-    // Collect diagnostics
-    const allDiagnostics: Diagnostic[] = [];
-    for (const client of clients) {
-      const diags = client.diagnostics.get(absPath);
-      if (diags) allDiagnostics.push(...diags);
-    }
-
-    return allDiagnostics;
+    await wait;
+    return client.diags.get(abs) || [];
   }
 
-  async shutdown(): Promise<void> {
-    for (const client of this.clients.values()) {
-      try {
-        await client.connection.sendRequest("shutdown");
-        await client.connection.sendNotification("exit");
-        client.connection.end();
-        client.process.kill();
-      } catch { /* ignore */ }
-    }
+  async shutdown() {
+    debug("Shutdown...");
+    await Promise.all(
+      Array.from(this.clients.values()).map(async (c) => {
+        try {
+          await Promise.race([
+            c.conn.sendRequest("shutdown"),
+            new Promise((r) => setTimeout(r, 1000)),
+          ]);
+          c.conn.sendNotification("exit");
+          c.conn.end();
+        } catch {}
+        c.proc.kill();
+      }),
+    );
     this.clients.clear();
   }
 }
 
 // ============================================================================
-// Hook Export
+// Hook
 // ============================================================================
 
 export default function (pi: HookAPI) {
-  let lspManager: LSPManager | null = null;
+  let mgr: LSPManager | null = null;
 
-  pi.on("session_start", async (_event, ctx) => {
-    lspManager = new LSPManager(ctx.cwd);
-    
-    // Pre-warm LSP by finding project roots and initializing clients
-    // This makes first edit faster
-    const warmupFiles = [
-      "pubspec.yaml",      // Dart/Flutter
-      "package.json",      // JS/TS
-      "pyproject.toml",    // Python
-      "go.mod",            // Go
-      "Cargo.toml",        // Rust
-    ];
-    
-    for (const marker of warmupFiles) {
-      const markerPath = path.join(ctx.cwd, marker);
-      if (fs.existsSync(markerPath)) {
-        // Find a source file to trigger LSP init
-        const ext = marker === "pubspec.yaml" ? ".dart" 
-          : marker === "package.json" ? ".ts"
-          : marker === "pyproject.toml" ? ".py"
-          : marker === "go.mod" ? ".go"
-          : marker === "Cargo.toml" ? ".rs"
-          : null;
-        if (ext) {
-          // Just get clients to trigger initialization (don't wait for diagnostics)
-          lspManager.getClientsForFile(path.join(ctx.cwd, `dummy${ext}`)).catch(() => {});
-        }
-        break;
-      }
-    }
+  pi.on("session_start", (_, ctx) => {
+    mgr = new LSPManager(ctx.cwd);
+  });
+  pi.on("session_end", async () => {
+    await mgr?.shutdown();
+    mgr = null;
   });
 
-  pi.on("tool_result", async (event, ctx) => {
-    if (!lspManager) return;
-
-    const isWrite = event.toolName === "write";
-    const isEdit = event.toolName === "edit";
-    if (!isWrite && !isEdit) return;
-
-    const filePath = event.input.path as string;
-    if (!filePath) return;
-
-    const ext = path.extname(filePath);
-    const supported = LSP_SERVERS.some((s) => s.extensions.includes(ext));
-    if (!supported) return;
+  pi.on("tool_result", async (ev, ctx) => {
+    if (!mgr || (ev.toolName !== "write" && ev.toolName !== "edit")) return;
+    const file = ev.input.path as string;
+    if (!file || !EXT_CFG.has(path.extname(file))) return;
 
     try {
-      // Wait briefly for diagnostics (non-blocking feel but catches most cases)
-      const diagnostics = await lspManager.touchFileAndWait(filePath, DIAGNOSTICS_WAIT_MS);
-      
-      // Filter based on tool type
-      const errors = isEdit 
-        ? diagnostics.filter((item) => item.severity === 1)
-        : diagnostics;
-      
-      if (errors.length === 0) return;
+      const diags = await mgr.getDiagnostics(file, DIAG_TIMEOUT);
+      // Edit: errors only (mid-fix). Write: all (full picture)
+      const filtered =
+        ev.toolName === "edit" ? diags.filter((d) => d.severity === 1) : diags;
+      if (!filtered.length) return;
 
-      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(ctx.cwd, filePath);
-      const relativePath = path.relative(ctx.cwd, absPath);
-      const errorCount = errors.filter(e => e.severity === 1).length;
-      
-      // Build notification for user
-      const MAX_DISPLAY = 5;
-      const displayErrors = errors.slice(0, MAX_DISPLAY);
-      const errorLines = displayErrors.map(e => {
-        const line = e.range.start.line + 1;
-        const sev = e.severity === 1 ? "ERROR" : "WARN";
-        const msg = e.message.split('\n')[0];
-        return `${sev}[${line}] ${msg}`;
-      });
-      
-      let notification = `📋 ${relativePath}\n${errorLines.join('\n')}`;
-      if (errors.length > MAX_DISPLAY) {
-        notification += `\n... +${errors.length - MAX_DISPLAY} more`;
-      }
-      
-      // Show to user
-      if (ctx.hasUI) {
-        ctx.ui.notify(notification, errorCount > 0 ? "error" : "warning");
-      } else {
-        console.error(notification);
-      }
-      
-      // Append to result for LLM
-      const output = `\nThis file has errors, please fix\n<file_diagnostics>\n${errors.map(prettyDiagnostic).join("\n")}\n</file_diagnostics>\n`;
-      return { result: event.result + output };
-    } catch {
-      // Ignore LSP errors
+      const abs = path.isAbsolute(file) ? file : path.resolve(ctx.cwd, file);
+      const rel = path.relative(ctx.cwd, abs);
+      const errs = filtered.filter((d) => d.severity === 1).length;
+
+      const lines = filtered
+        .slice(0, 5)
+        .map(
+          (d) =>
+            `${d.severity === 1 ? "ERROR" : "WARN"}[${d.range.start.line + 1}] ${d.message.split("\n")[0]}`,
+        );
+      let msg = `📋 ${rel}\n${lines.join("\n")}`;
+      if (filtered.length > 5) msg += `\n... +${filtered.length - 5} more`;
+
+      ctx.hasUI
+        ? ctx.ui.notify(msg, errs ? "error" : "warning")
+        : console.error(msg);
+
+      return {
+        result:
+          ev.result +
+          `\nThis file has errors, please fix\n<file_diagnostics>\n${filtered.map(fmtDiag).join("\n")}\n</file_diagnostics>\n`,
+      };
+    } catch (e) {
+      debug("Diag error:", e);
     }
-
-    return undefined;
   });
 }
