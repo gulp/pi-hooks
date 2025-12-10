@@ -583,9 +583,9 @@ export default function (pi: HookAPI) {
     // Clear pending
     pendingFiles.clear();
 
-    // Send to agent if there are errors
+    // Send diagnostics to agent (silently, no visible message)
     if (hasErrors && llmOutput) {
-      pi.send(`LSP Diagnostics - please fix these errors:\n${llmOutput}`);
+      pi.send(llmOutput);
     }
   });
 }
