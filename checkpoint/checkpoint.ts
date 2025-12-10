@@ -269,16 +269,10 @@ export default function (pi: HookAPI) {
 
   pi.on("session_start", async (event, ctx) => {
     gitAvailable = await isGitRepo(ctx.cwd);
-    console.error(
-      `[checkpoint] session_start: gitAvailable=${gitAvailable}, sessionFile=${ctx.sessionFile}`,
-    );
     if (!gitAvailable || !ctx.sessionFile) return;
 
     currentSessionFile = ctx.sessionFile;
     currentSessionId = await getSessionIdFromFile(ctx.sessionFile);
-    console.error(
-      `[checkpoint] session_start: currentSessionId=${currentSessionId}`,
-    );
   });
 
   pi.on("turn_start", async (event, ctx) => {
@@ -338,11 +332,6 @@ export default function (pi: HookAPI) {
     const checkpoints = (
       await Promise.all(sessionIds.map((id) => loadAllCheckpoints(ctx.cwd, id)))
     ).flat();
-
-    console.error(`[checkpoint] branch: sessionIds=${sessionIds.join(" → ")}`);
-    console.error(
-      `[checkpoint] branch: found ${checkpoints.length} checkpoints`,
-    );
 
     if (checkpoints.length === 0) {
       ctx.ui.notify("No checkpoints available", "warning");
@@ -422,15 +411,9 @@ export default function (pi: HookAPI) {
   });
 
   pi.on("session_switch", async (event, ctx) => {
-    console.error(
-      `[checkpoint] session_switch: reason=${event.reason}, newSessionFile=${event.newSessionFile}`,
-    );
     if (!gitAvailable) return;
     if (event.reason === "branch") {
       currentSessionId = await getSessionIdFromFile(event.newSessionFile);
-      console.error(
-        `[checkpoint] session_switch: updated currentSessionId=${currentSessionId}`,
-      );
     }
   });
 }
