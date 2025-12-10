@@ -22,7 +22,7 @@ import type { Diagnostic } from "vscode-languageserver-types";
 // Configuration
 // ============================================================================
 
-const DIAGNOSTICS_TIMEOUT_MS = 3000;
+const DIAGNOSTICS_TIMEOUT_MS = 10000;
 const INIT_TIMEOUT_MS = 30000;
 
 // ============================================================================
