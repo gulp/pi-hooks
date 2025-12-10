@@ -148,6 +148,8 @@ async function restoreCheckpoint(
   }
 
   const root = await getRepoRoot(cwd);
+  // Clean untracked files first (respects .gitignore)
+  await git("clean -fd", root);
   await git(`reset --hard ${cp.headSha}`, root);
   await git(`read-tree --reset ${cp.worktreeTreeSha}`, root);
   await git("checkout-index -a -f", root);
