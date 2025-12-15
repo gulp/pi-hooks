@@ -16,7 +16,7 @@
  */
 
 import type { HookAPI } from "@mariozechner/pi-coding-agent/hooks";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { mkdtemp, rm, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -57,6 +57,51 @@ function git(
       proc.stdin.write(opts.input);
       proc.stdin.end();
     }
+  });
+}
+
+// Low-priority git command using spawn (doesn't block shell)
+function gitLowPriority(
+  cmd: string,
+  cwd: string,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Parse command respecting quotes for arguments with spaces
+    const args: string[] = [];
+    let current = "";
+    let inQuote = false;
+    for (const char of cmd) {
+      if (char === "'" || char === '"') {
+        inQuote = !inQuote;
+      } else if (char === " " && !inQuote) {
+        if (current) args.push(current);
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    if (current) args.push(current);
+    
+    const proc = spawn("git", args, { 
+      cwd, 
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    
+    let stdout = "";
+    let stderr = "";
+    
+    proc.stdout.on("data", (data) => { stdout += data; });
+    proc.stderr.on("data", (data) => { stderr += data; });
+    
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(stderr || `git ${cmd} failed with code ${code}`));
+      }
+    });
+    
+    proc.on("error", reject);
   });
 }
 
@@ -165,14 +210,16 @@ async function restoreCheckpoint(
 async function loadCheckpointFromRef(
   cwd: string,
   refName: string,
+  lowPriority = false,
 ): Promise<CheckpointData | null> {
   try {
     const root = await getRepoRoot(cwd);
-    const commitSha = await git(
+    const gitFn = lowPriority ? gitLowPriority : git;
+    const commitSha = await gitFn(
       `rev-parse --verify ${REF_BASE}/${refName}`,
       root,
     );
-    const commitMsg = await git(`cat-file commit ${commitSha}`, root);
+    const commitMsg = await gitFn(`cat-file commit ${commitSha}`, root);
 
     const get = (key: string) =>
       commitMsg.match(new RegExp(`^${key} (.+)$`, "m"))?.[1]?.trim();
@@ -200,12 +247,13 @@ async function loadCheckpointFromRef(
   }
 }
 
-async function listCheckpointRefs(cwd: string): Promise<string[]> {
+async function listCheckpointRefs(cwd: string, lowPriority = false): Promise<string[]> {
   try {
     const root = await getRepoRoot(cwd);
     const prefix = `${REF_BASE}/`;
-    const stdout = await git(
-      `for-each-ref --format='%(refname)' ${prefix}`,
+    const gitFn = lowPriority ? gitLowPriority : git;
+    const stdout = await gitFn(
+      `for-each-ref --format=%(refname) ${prefix}`,
       root,
     );
     return stdout
@@ -220,8 +268,31 @@ async function listCheckpointRefs(cwd: string): Promise<string[]> {
 async function loadAllCheckpoints(
   cwd: string,
   sessionFilter?: string,
+  lowPriority = false,
 ): Promise<CheckpointData[]> {
-  const refs = await listCheckpointRefs(cwd);
+  const refs = await listCheckpointRefs(cwd, lowPriority);
+  
+  // For low priority loading, process in small batches with yields
+  if (lowPriority) {
+    const results: CheckpointData[] = [];
+    const BATCH_SIZE = 3;
+    for (let i = 0; i < refs.length; i += BATCH_SIZE) {
+      const batch = refs.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map((ref) => loadCheckpointFromRef(cwd, ref, true)),
+      );
+      results.push(
+        ...batchResults.filter(
+          (cp): cp is CheckpointData =>
+            cp !== null && (!sessionFilter || cp.sessionId === sessionFilter),
+        ),
+      );
+      // Yield to event loop between batches
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return results;
+  }
+  
   const results = await Promise.all(
     refs.map((ref) => loadCheckpointFromRef(cwd, ref)),
   );
@@ -278,11 +349,15 @@ export default function (pi: HookAPI) {
     currentSessionFile = ctx.sessionFile;
     currentSessionId = await getSessionIdFromFile(ctx.sessionFile);
     
-    // Pre-load checkpoints in background for faster branch menu
-    loadAllCheckpoints(ctx.cwd).then((cps) => {
-      checkpointCache = cps;
-      cacheSessionIds = new Set(cps.map((cp) => cp.sessionId));
-    }).catch(() => {});
+    // Defer checkpoint loading to not block initial rendering
+    // Use setImmediate to let the event loop process UI first
+    setImmediate(() => {
+      // Use low-priority loading with batching and yields
+      loadAllCheckpoints(ctx.cwd, undefined, true).then((cps) => {
+        checkpointCache = cps;
+        cacheSessionIds = new Set(cps.map((cp) => cp.sessionId));
+      }).catch(() => {});
+    });
   });
 
   pi.on("turn_start", async (event, ctx) => {
