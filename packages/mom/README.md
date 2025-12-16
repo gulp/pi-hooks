@@ -192,6 +192,9 @@ Mom has access to these tools:
 - **write**: Create or overwrite files
 - **edit**: Make surgical edits to existing files
 - **attach**: Share files back to the chat (Slack or Discord)
+- **react**: Add emoji reactions to messages. Accepts both `thumbsup` and `:thumbsup:` formats (normalized automatically per platform)
+
+Mom can see reactions on the message that @mentioned her, but not on other messages in the channel. She can add reactions to any message if given the message ID.
 
 ### Bash Execution Environment
 
