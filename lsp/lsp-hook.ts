@@ -547,33 +547,37 @@ class LSPManager {
 export default function (pi: HookAPI) {
   let lspManager: LSPManager | null = null;
 
-  pi.on("session_start", async (_event, ctx) => {
-    lspManager = new LSPManager(ctx.cwd);
-
-    // Pre-warm: trigger LSP initialization for detected project type
-    const warmupMap: Record<string, string> = {
-      "pubspec.yaml": ".dart",
-      "package.json": ".ts",
-      "pyproject.toml": ".py",
-      "go.mod": ".go",
-      "Cargo.toml": ".rs",
-    };
-
-    for (const [marker, ext] of Object.entries(warmupMap)) {
-      if (fs.existsSync(path.join(ctx.cwd, marker))) {
-        // Trigger lazy init without waiting
-        lspManager
-          .getClientsForFile(path.join(ctx.cwd, `dummy${ext}`))
-          .catch(() => {});
-        break;
+  pi.on("session", async (event, ctx) => {
+    // On clear or switch, shutdown existing LSP manager
+    if (event.reason === "clear" || event.reason === "switch") {
+      if (lspManager) {
+        await lspManager.shutdown();
+        lspManager = null;
       }
     }
-  });
+    
+    // Initialize LSP manager on start or switch
+    if (event.reason === "start" || event.reason === "switch") {
+      lspManager = new LSPManager(ctx.cwd);
 
-  pi.on("session_end", async () => {
-    if (lspManager) {
-      await lspManager.shutdown();
-      lspManager = null;
+      // Pre-warm: trigger LSP initialization for detected project type
+      const warmupMap: Record<string, string> = {
+        "pubspec.yaml": ".dart",
+        "package.json": ".ts",
+        "pyproject.toml": ".py",
+        "go.mod": ".go",
+        "Cargo.toml": ".rs",
+      };
+
+      for (const [marker, ext] of Object.entries(warmupMap)) {
+        if (fs.existsSync(path.join(ctx.cwd, marker))) {
+          // Trigger lazy init without waiting
+          lspManager
+            .getClientsForFile(path.join(ctx.cwd, `dummy${ext}`))
+            .catch(() => {});
+          break;
+        }
+      }
     }
   });
 

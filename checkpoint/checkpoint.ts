@@ -342,22 +342,31 @@ export default function (pi: HookAPI) {
   let checkpointCache: CheckpointData[] | null = null;
   let cacheSessionIds: Set<string> = new Set();
 
-  pi.on("session_start", async (event, ctx) => {
-    gitAvailable = await isGitRepo(ctx.cwd);
-    if (!gitAvailable || !ctx.sessionFile) return;
+  pi.on("session", async (event, ctx) => {
+    switch (event.reason) {
+      case "start":
+        gitAvailable = await isGitRepo(ctx.cwd);
+        if (!gitAvailable || !ctx.sessionFile) return;
 
-    currentSessionFile = ctx.sessionFile;
-    currentSessionId = await getSessionIdFromFile(ctx.sessionFile);
-    
-    // Defer checkpoint loading to not block initial rendering
-    // Use setImmediate to let the event loop process UI first
-    setImmediate(() => {
-      // Use low-priority loading with batching and yields
-      loadAllCheckpoints(ctx.cwd, undefined, true).then((cps) => {
-        checkpointCache = cps;
-        cacheSessionIds = new Set(cps.map((cp) => cp.sessionId));
-      }).catch(() => {});
-    });
+        currentSessionFile = ctx.sessionFile;
+        currentSessionId = await getSessionIdFromFile(ctx.sessionFile);
+        
+        // Defer checkpoint loading to not block initial rendering
+        // Use setImmediate to let the event loop process UI first
+        setImmediate(() => {
+          // Use low-priority loading with batching and yields
+          loadAllCheckpoints(ctx.cwd, undefined, true).then((cps) => {
+            checkpointCache = cps;
+            cacheSessionIds = new Set(cps.map((cp) => cp.sessionId));
+          }).catch(() => {});
+        });
+        break;
+        
+      case "switch":
+        if (!gitAvailable || !ctx.sessionFile) return;
+        currentSessionId = await getSessionIdFromFile(ctx.sessionFile);
+        break;
+    }
   });
 
   pi.on("turn_start", async (event, ctx) => {
@@ -545,10 +554,4 @@ export default function (pi: HookAPI) {
     return undefined;
   });
 
-  pi.on("session_switch", async (event, ctx) => {
-    if (!gitAvailable) return;
-    if (event.reason === "branch") {
-      currentSessionId = await getSessionIdFromFile(event.newSessionFile);
-    }
-  });
 }
