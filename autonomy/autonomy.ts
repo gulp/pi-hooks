@@ -32,7 +32,7 @@ interface AutonomyConfig {
 	allowSafeWrites: boolean;
 	allowMediumBash: boolean;
 	allowAllBash: boolean;
-	blockDenylist: boolean;
+	allowProtectedPaths: boolean;
 }
 
 const AUTONOMY_CONFIGS: Record<AutonomyLevel, AutonomyConfig> = {
@@ -43,7 +43,7 @@ const AUTONOMY_CONFIGS: Record<AutonomyLevel, AutonomyConfig> = {
 		allowSafeWrites: false,
 		allowMediumBash: false,
 		allowAllBash: false,
-		blockDenylist: true,
+		allowProtectedPaths: false,
 	},
 	low: {
 		label: "Low",
@@ -52,7 +52,7 @@ const AUTONOMY_CONFIGS: Record<AutonomyLevel, AutonomyConfig> = {
 		allowSafeWrites: true,
 		allowMediumBash: false,
 		allowAllBash: false,
-		blockDenylist: true,
+		allowProtectedPaths: false,
 	},
 	medium: {
 		label: "Medium",
@@ -61,7 +61,7 @@ const AUTONOMY_CONFIGS: Record<AutonomyLevel, AutonomyConfig> = {
 		allowSafeWrites: true,
 		allowMediumBash: true,
 		allowAllBash: false,
-		blockDenylist: true,
+		allowProtectedPaths: false,
 	},
 	high: {
 		label: "High",
@@ -70,7 +70,7 @@ const AUTONOMY_CONFIGS: Record<AutonomyLevel, AutonomyConfig> = {
 		allowSafeWrites: true,
 		allowMediumBash: true,
 		allowAllBash: true,
-		blockDenylist: false,
+		allowProtectedPaths: true,
 	},
 };
 
@@ -302,22 +302,22 @@ function matchesDenylist(command: string): boolean {
 	return COMMAND_DENYLIST_PATTERNS.some(p => p.test(command));
 }
 
+// Extended read-only commands (beyond allowlist, for autonomy checks)
+const READ_ONLY_COMMANDS: string[] = [
+	...COMMAND_ALLOWLIST,
+	"ps", "top", "htop", "grep", "find", "locate", "tree",
+	"git status", "git log", "git diff", "git branch", "git show",
+	"npm list", "npm ls", "yarn list", "pnpm list",
+	"node --version", "npm --version", "python --version",
+];
+
 function isReadOnlyCommand(command: string): boolean {
 	// Don't trust classification if command has chaining
 	if (hasCommandChaining(command)) return false;
 
-	const readOnlyCommands = [
-		"ls", "pwd", "echo", "cat", "head", "tail", "wc", "which", "whoami",
-		"date", "uname", "env", "printenv", "type", "file", "stat", "df", "du",
-		"free", "uptime", "ps", "top", "htop", "grep", "find", "locate", "tree",
-		"git status", "git log", "git diff", "git branch", "git show",
-		"npm list", "npm ls", "yarn list", "pnpm list",
-		"node --version", "npm --version", "python --version",
-	];
-
 	const base = getBaseCommand(command);
-	return readOnlyCommands.includes(base) ||
-		readOnlyCommands.some(cmd => command.trim().startsWith(cmd));
+	return READ_ONLY_COMMANDS.includes(base) ||
+		READ_ONLY_COMMANDS.some(cmd => command.trim().startsWith(cmd));
 }
 
 function isMediumCommand(command: string): boolean {
@@ -358,10 +358,6 @@ function getLevelForBashCommand(command: string): AutonomyLevel {
 
 function getLevelForWrite(withinProject: boolean): AutonomyLevel {
 	return withinProject ? "low" : "high";
-}
-
-function formatCommand(command: string, maxLen: number = 80): string {
-	return command.length <= maxLen ? command : command.slice(0, maxLen - 3) + "...";
 }
 
 // ============================================================================
@@ -449,6 +445,9 @@ export default function (pi: HookAPI) {
 						"info"
 					);
 				}
+			} else {
+				// No UI (print mode: pi -p) - default to high to avoid blocking
+				autonomyLevel = "high";
 			}
 		} else if (event.reason === "clear") {
 			sessionDeniedCommands.clear();
@@ -551,13 +550,11 @@ export default function (pi: HookAPI) {
 		// Protected paths - auto-allow at High, prompt otherwise
 		if (isProtectedPath(filePath)) {
 			// Auto-allow at High autonomy
-			if (config.allowAllBash) return undefined;
+			if (config.allowProtectedPaths) return undefined;
 
 			if (!ctx.hasUI) {
 				return { block: true, reason: "Protected path blocked (no UI)" };
 			}
-
-			const action = event.toolName === "write" ? "Write" : "Edit";
 
 			const choice = await ctx.ui.select(
 				`⚠️ PROTECTED path:\n\n  ${filePath}\n\nCurrent: ${config.label}`,
