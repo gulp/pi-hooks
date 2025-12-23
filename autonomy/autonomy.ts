@@ -287,14 +287,48 @@ function getBaseCommand(command: string): string {
 	return match ? match[1] : "";
 }
 
-function hasCommandChaining(command: string): boolean {
-	// Check for command chaining/subshells that could bypass allowlist
-	return /[;&|`]|\$\(/.test(command);
+function hasDangerousChaining(command: string): boolean {
+	// Check for dangerous command chaining/subshells
+	// Simple pipes (|) to output formatters are allowed
+	return /[;&`]|\$\(|\|\|/.test(command);
+}
+
+// Safe commands to pipe output to (output limiters/formatters)
+const SAFE_PIPE_TARGETS: string[] = [
+	"head", "tail", "wc", "sort", "uniq", "cut", "awk", "sed", "tr", "grep", "less", "more",
+];
+
+/**
+ * Check if command is "allowedCmd | safeTarget" or "allowedCmd | safe | safe" pattern
+ * e.g., "grep foo file.txt | head -10" or "grep foo | head -20 | wc -l"
+ */
+function isAllowedPipeline(command: string): boolean {
+	if (!command.includes("|")) return false;
+	
+	// Allow up to 2 pipes (3 segments)
+	const segments = command.split("|").map(s => s.trim());
+	if (segments.length < 2 || segments.length > 3) return false;
+	
+	// First segment must be in allowlist
+	const firstBase = getBaseCommand(segments[0]);
+	if (!COMMAND_ALLOWLIST.includes(firstBase)) return false;
+	
+	// Remaining segments must be safe pipe targets
+	for (let i = 1; i < segments.length; i++) {
+		const base = getBaseCommand(segments[i]);
+		if (!SAFE_PIPE_TARGETS.includes(base)) return false;
+	}
+	
+	return true;
 }
 
 function isInAllowlist(command: string): boolean {
-	// Don't trust allowlist if command has chaining
-	if (hasCommandChaining(command)) return false;
+	// Check for dangerous chaining
+	if (hasDangerousChaining(command)) return false;
+	
+	// Allow "allowedCmd | safeTarget" pattern
+	if (isAllowedPipeline(command)) return true;
+	
 	return COMMAND_ALLOWLIST.includes(getBaseCommand(command));
 }
 
@@ -312,8 +346,11 @@ const READ_ONLY_COMMANDS: string[] = [
 ];
 
 function isReadOnlyCommand(command: string): boolean {
-	// Don't trust classification if command has chaining
-	if (hasCommandChaining(command)) return false;
+	// Check for dangerous chaining
+	if (hasDangerousChaining(command)) return false;
+
+	// Allow read-only pipelines
+	if (isAllowedPipeline(command)) return true;
 
 	const base = getBaseCommand(command);
 	return READ_ONLY_COMMANDS.includes(base) ||
@@ -321,8 +358,8 @@ function isReadOnlyCommand(command: string): boolean {
 }
 
 function isMediumCommand(command: string): boolean {
-	// Don't trust classification if command has chaining
-	if (hasCommandChaining(command)) return false;
+	// Don't trust classification if command has dangerous chaining
+	if (hasDangerousChaining(command)) return false;
 
 	const mediumPatterns = [
 		/^npm\s+(install|ci|test|run|build|start)/i,
