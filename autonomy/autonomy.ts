@@ -279,101 +279,77 @@ function saveAutonomyLevel(settingsPath: string, level: AutonomyLevel, gitRoot: 
 }
 
 // ============================================================================
-// COMMAND CLASSIFICATION
+// COMMAND CLASSIFICATION (regex-based for performance)
 // ============================================================================
 
-function getBaseCommand(command: string): string {
-	const match = command.trim().match(/^(\S+)/);
-	return match ? match[1] : "";
-}
+// Dangerous chaining patterns (blocks ;, &&, &, ||, `, $())
+const DANGEROUS_CHAINING_RE = /[;`]|&&|\|\||\$\(|&/;
 
-function hasDangerousChaining(command: string): boolean {
-	// Check for dangerous command chaining/subshells
-	// Simple pipes (|) to output formatters are allowed
-	return /[;&`]|\$\(|\|\|/.test(command);
-}
+// Allowlist: always permitted commands (single regex)
+const ALLOWLIST_RE = /^(ls|pwd|echo|cat|head|tail|wc|which|whoami|date|uname|env|printenv|type|file|stat|df|du|free|uptime|grep|find)\b/;
 
-// Safe commands to pipe output to (output limiters/formatters)
-const SAFE_PIPE_TARGETS: string[] = [
-	"head", "tail", "wc", "sort", "uniq", "cut", "awk", "sed", "tr", "grep", "less", "more",
-];
+// Safe pipe targets (output formatters)
+const SAFE_PIPE_RE = /^(head|tail|wc|sort|uniq|cut|awk|sed|tr|grep|less|more)\b/;
+
+// Read-only commands (extends allowlist)
+const READ_ONLY_RE = /^(ls|pwd|echo|cat|head|tail|wc|which|whoami|date|uname|env|printenv|type|file|stat|df|du|free|uptime|grep|find|ps|top|htop|locate|tree)\b/;
+
+// Read-only prefixes (git, npm, etc.)
+const READ_ONLY_PREFIX_RE = /^(git\s+(status|log|diff|branch|show)|npm\s+(list|ls)|yarn\s+list|pnpm\s+list|node\s+--version|npm\s+--version|python\s+--version)\b/;
+
+// Medium-risk commands (dev operations)
+const MEDIUM_COMMAND_RE = /^(npm\s+(install|ci|test|run|build|start)|yarn\s+(install|add|test|build|start)|pnpm\s+(install|add|test|build|start)|pip\s+install|cargo\s+(build|test|run)|go\s+(build|test|run|get)|make|git\s+(add|commit|stash|checkout|branch|merge|rebase|fetch|pull)|mkdir|touch)\b/i;
 
 /**
- * Check if command is "allowedCmd | safeTarget" or "allowedCmd | safe | safe" pattern
- * e.g., "grep foo file.txt | head -10" or "grep foo | head -20 | wc -l"
+ * Check if command is "allowedCmd | safeTarget" pattern (up to 2 pipes)
  */
 function isAllowedPipeline(command: string): boolean {
-	if (!command.includes("|")) return false;
+	const pipeIdx = command.indexOf("|");
+	if (pipeIdx === -1) return false;
 	
-	// Allow up to 2 pipes (3 segments)
-	const segments = command.split("|").map(s => s.trim());
+	const segments = command.split("|");
 	if (segments.length < 2 || segments.length > 3) return false;
 	
-	// First segment must be in allowlist
-	const firstBase = getBaseCommand(segments[0]);
-	if (!COMMAND_ALLOWLIST.includes(firstBase)) return false;
+	// First segment must match allowlist
+	if (!ALLOWLIST_RE.test(segments[0].trim())) return false;
 	
 	// Remaining segments must be safe pipe targets
 	for (let i = 1; i < segments.length; i++) {
-		const base = getBaseCommand(segments[i]);
-		if (!SAFE_PIPE_TARGETS.includes(base)) return false;
+		if (!SAFE_PIPE_RE.test(segments[i].trim())) return false;
 	}
 	
 	return true;
 }
 
 function isInAllowlist(command: string): boolean {
-	// Check for dangerous chaining
-	if (hasDangerousChaining(command)) return false;
+	if (DANGEROUS_CHAINING_RE.test(command)) return false;
+	const trimmed = command.trim();
 	
-	// Allow "allowedCmd | safeTarget" pattern
-	if (isAllowedPipeline(command)) return true;
+	// Check pipeline pattern
+	if (trimmed.includes("|")) return isAllowedPipeline(trimmed);
 	
-	return COMMAND_ALLOWLIST.includes(getBaseCommand(command));
+	// Simple command
+	return ALLOWLIST_RE.test(trimmed);
 }
 
 function matchesDenylist(command: string): boolean {
 	return COMMAND_DENYLIST_PATTERNS.some(p => p.test(command));
 }
 
-// Extended read-only commands (beyond allowlist, for autonomy checks)
-const READ_ONLY_COMMANDS: string[] = [
-	...COMMAND_ALLOWLIST,
-	"ps", "top", "htop", "locate", "tree",
-	"git status", "git log", "git diff", "git branch", "git show",
-	"npm list", "npm ls", "yarn list", "pnpm list",
-	"node --version", "npm --version", "python --version",
-];
-
 function isReadOnlyCommand(command: string): boolean {
-	// Check for dangerous chaining
-	if (hasDangerousChaining(command)) return false;
-
-	// Allow read-only pipelines
-	if (isAllowedPipeline(command)) return true;
-
-	const base = getBaseCommand(command);
-	return READ_ONLY_COMMANDS.includes(base) ||
-		READ_ONLY_COMMANDS.some(cmd => command.trim().startsWith(cmd));
+	if (DANGEROUS_CHAINING_RE.test(command)) return false;
+	const trimmed = command.trim();
+	
+	// Check pipeline
+	if (trimmed.includes("|") && isAllowedPipeline(trimmed)) return true;
+	
+	// Check read-only patterns
+	return READ_ONLY_RE.test(trimmed) || READ_ONLY_PREFIX_RE.test(trimmed);
 }
 
 function isMediumCommand(command: string): boolean {
-	// Don't trust classification if command has dangerous chaining
-	if (hasDangerousChaining(command)) return false;
-
-	const mediumPatterns = [
-		/^npm\s+(install|ci|test|run|build|start)/i,
-		/^yarn\s+(install|add|test|build|start)/i,
-		/^pnpm\s+(install|add|test|build|start)/i,
-		/^pip\s+install/i,
-		/^cargo\s+(build|test|run)/i,
-		/^go\s+(build|test|run|get)/i,
-		/^make\b/i,
-		/^git\s+(add|commit|stash|checkout|branch|merge|rebase|fetch|pull)/i,
-		/^mkdir\b/i,
-		/^touch\b/i,
-	];
-	return mediumPatterns.some(p => p.test(command.trim()));
+	if (DANGEROUS_CHAINING_RE.test(command)) return false;
+	return MEDIUM_COMMAND_RE.test(command.trim());
 }
 
 function isProtectedPath(filePath: string): boolean {
