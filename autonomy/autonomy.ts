@@ -283,7 +283,8 @@ function saveAutonomyLevel(settingsPath: string, level: AutonomyLevel, gitRoot: 
 // ============================================================================
 
 // Dangerous chaining patterns (blocks ;, &&, &, ||, `, $())
-const DANGEROUS_CHAINING_RE = /[;`]|&&|\|\||\$\(|&/;
+// Note: \; in find -exec is safe, so we check for ; not preceded by \
+const DANGEROUS_CHAINING_RE = /`|&&|\|\||\$\(|&|(?<!\\);/;
 
 // Allowlist: always permitted commands (single regex)
 const ALLOWLIST_RE = /^(ls|pwd|echo|cat|head|tail|wc|which|whoami|date|uname|env|printenv|type|file|stat|df|du|free|uptime|grep|find)\b/;
