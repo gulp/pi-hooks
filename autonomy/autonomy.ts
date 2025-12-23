@@ -80,7 +80,7 @@ const AUTONOMY_ORDER: AutonomyLevel[] = ["off", "low", "medium", "high"];
 const COMMAND_ALLOWLIST: string[] = [
 	"ls", "pwd", "echo", "cat", "head", "tail", "wc", "which", "whoami",
 	"date", "uname", "env", "printenv", "type", "file", "stat", "df", "du",
-	"free", "uptime",
+	"free", "uptime", "grep", "find",
 ];
 
 // Commands always dangerous - require confirmation even at high
@@ -305,7 +305,7 @@ function matchesDenylist(command: string): boolean {
 // Extended read-only commands (beyond allowlist, for autonomy checks)
 const READ_ONLY_COMMANDS: string[] = [
 	...COMMAND_ALLOWLIST,
-	"ps", "top", "htop", "grep", "find", "locate", "tree",
+	"ps", "top", "htop", "locate", "tree",
 	"git status", "git log", "git diff", "git branch", "git show",
 	"npm list", "npm ls", "yarn list", "pnpm list",
 	"node --version", "npm --version", "python --version",
