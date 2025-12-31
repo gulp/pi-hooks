@@ -198,6 +198,26 @@ test("restore: extra untracked files are removed", () =>
     assert(files.includes("initial.txt"), "initial.txt should exist");
   }));
 
+test("restore: modified untracked file content is restored", () =>
+  withTestRepo(async (dir, root) => {
+    // Add untracked file with specific content
+    await writeFile(join(dir, "untracked.txt"), "original content");
+
+    const cp = await createCheckpoint(root, "untracked-modify-test", 0, "session-1");
+
+    // Modify the untracked file
+    await writeFile(join(dir, "untracked.txt"), "modified content");
+
+    // Restore
+    await restoreCheckpoint(root, cp);
+
+    // Verify original content is back
+    assert(
+      (await readFile(join(dir, "untracked.txt"), "utf-8")) === "original content",
+      "Untracked file content should be restored to original"
+    );
+  }));
+
 test("restore: modified file content is restored", () =>
   withTestRepo(async (dir, root) => {
     // Modify file
