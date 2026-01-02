@@ -1,10 +1,11 @@
-# LSP Hook
+# LSP Hook + Tool
 
-Language Server Protocol diagnostics for pi-coding-agent.
+Language Server Protocol integration for pi-coding-agent.
 
 ## Highlights
 
-- Runs `write`/`edit` results through the matching LSP and appends diagnostics to tool output
+- **Hook**: Runs `write`/`edit` results through the matching LSP and appends diagnostics to tool output
+- **Tool**: On-demand LSP queries (definitions, references, hover, symbols, diagnostics, signatures)
 - Manages one LSP server per project root and reuses them across turns
 - Supports TypeScript/JavaScript, Vue, Svelte, Dart/Flutter, Python, Go, and Rust
 
@@ -44,8 +45,16 @@ Or add to global settings (`~/.pi/agent/settings.json`):
 {
   "hooks": [
     "/absolute/path/to/pi-hooks/lsp/lsp.ts"
+  ],
+  "customTools": [
+    "/absolute/path/to/pi-hooks/lsp"
   ]
 }
+```
+
+Or use CLI flags:
+```bash
+pi --hook ./lsp/lsp.ts --tool ./lsp
 ```
 
 ### Prerequisites
@@ -76,18 +85,43 @@ The hook spawns binaries from your PATH.
 
 ## How It Works
 
+### Hook (auto-diagnostics)
+
 1. On `session_start`, warms up LSP for detected project type
 2. After each `write`/`edit`, sends file to LSP and waits for diagnostics
 3. Appends errors/warnings to tool result so agent can fix them
 4. Shows notification with diagnostic summary
+
+### Tool (on-demand queries)
+
+The `lsp` tool provides these actions:
+
+| Action | Description | Requires |
+|--------|-------------|----------|
+| `definition` | Jump to definition | `file` + (`line`/`column` or `query`) |
+| `references` | Find all references | `file` + (`line`/`column` or `query`) |
+| `hover` | Get type/docs info | `file` + (`line`/`column` or `query`) |
+| `symbols` | List symbols in file | `file`, optional `query` filter |
+| `diagnostics` | Get file diagnostics | `file` |
+| `signature` | Get function signature | `file` + (`line`/`column` or `query`) |
+
+**Query resolution**: For position-based actions, you can provide a `query` (symbol name) instead of `line`/`column`. The tool will find the symbol in the file and use its position.
+
+Example questions the LLM can answer using this tool:
+- "Where is `handleSessionStart` defined in `lsp-hook.ts`?"
+- "Find all references to `getManager`"
+- "What type does `getDefinition` return?"
+- "List symbols in `lsp-core.ts`"
 
 ## File Structure
 
 | File | Purpose |
 |------|---------|
 | `lsp.ts` | Hook entry point |
-| `lsp-hook.ts` | Event handlers and state management |
+| `lsp-hook.ts` | Hook event handlers and state management |
 | `lsp-core.ts` | LSPManager class and server configurations |
+| `lsp-shared.ts` | Shared singleton manager (used by hook and tool) |
+| `index.ts` | Tool entry point (`--tool ./lsp`) |
 
 ## Testing
 

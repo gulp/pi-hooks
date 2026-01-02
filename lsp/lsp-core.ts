@@ -17,7 +17,16 @@ import {
   StreamMessageWriter,
   type MessageConnection,
 } from "vscode-jsonrpc/node.js";
-import type { Diagnostic } from "vscode-languageserver-types";
+import {
+  type Diagnostic,
+  Location,
+  type LocationLink,
+  type DocumentSymbol,
+  type SymbolInformation,
+  type Hover,
+  type Position,
+  type SignatureHelp,
+} from "vscode-languageserver-types";
 
 // ============================================================================
 // Configuration
@@ -394,37 +403,73 @@ export class LSPManager {
     return clients;
   }
 
-  async touchFileAndWait(filePath: string, timeoutMs: number): Promise<Diagnostic[]> {
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.cwd, filePath);
-    const clients = await this.getClientsForFile(absPath);
-    if (clients.length === 0) return [];
+  private resolveFilePath(filePath: string): string {
+    return path.isAbsolute(filePath) ? filePath : path.resolve(this.cwd, filePath);
+  }
 
-    const uri = pathToFileURL(absPath).href;
-    const languageId = LANGUAGE_IDS[path.extname(filePath)] || "plaintext";
+  private getLanguageId(filePath: string): string {
+    return LANGUAGE_IDS[path.extname(filePath)] || "plaintext";
+  }
 
-    let content: string;
+  private readFileContent(absPath: string): string | null {
     try {
-      content = fs.readFileSync(absPath, "utf-8");
+      return fs.readFileSync(absPath, "utf-8");
     } catch {
-      return [];
+      return null;
+    }
+  }
+
+  private toPosition(line: number, column: number): Position {
+    return {
+      line: Math.max(0, line - 1),
+      character: Math.max(0, column - 1),
+    };
+  }
+
+  private normalizeLocations(
+    result: Location | Location[] | LocationLink[] | null | undefined
+  ): Location[] {
+    if (!result) return [];
+    const items = Array.isArray(result) ? result : [result];
+    if (items.length === 0) return [];
+
+    if (Location.is(items[0])) {
+      return items as Location[];
     }
 
-    const waitPromises: Promise<void>[] = [];
-    for (const client of clients) {
-      client.diagnostics.delete(absPath);
+    return (items as LocationLink[]).map((link) => ({
+      uri: link.targetUri,
+      range: link.targetSelectionRange ?? link.targetRange,
+    }));
+  }
 
-      const promise = new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, timeoutMs);
-        const listeners = client.diagnosticsListeners.get(absPath) || [];
-        listeners.push(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-        client.diagnosticsListeners.set(absPath, listeners);
-      });
-      waitPromises.push(promise);
+  private normalizeSymbols(
+    result: DocumentSymbol[] | SymbolInformation[] | null | undefined
+  ): DocumentSymbol[] {
+    if (!result || result.length === 0) return [];
+    const first = result[0] as DocumentSymbol | SymbolInformation;
+    if ("location" in first) {
+      return (result as SymbolInformation[]).map((symbol) => ({
+        name: symbol.name,
+        kind: symbol.kind,
+        range: symbol.location.range,
+        selectionRange: symbol.location.range,
+        detail: symbol.containerName,
+        tags: symbol.tags,
+        deprecated: symbol.deprecated,
+        children: [],
+      }));
     }
+    return result as DocumentSymbol[];
+  }
 
+  private async sendDidOpenOrChange(
+    clients: LSPClient[],
+    absPath: string,
+    uri: string,
+    languageId: string,
+    content: string
+  ): Promise<void> {
     for (const client of clients) {
       const version = client.openFiles.get(absPath);
 
@@ -444,6 +489,54 @@ export class LSPManager {
         }
       } catch {}
     }
+  }
+
+  private async loadFileForClients(filePath: string): Promise<{
+    clients: LSPClient[];
+    absPath: string;
+    uri: string;
+    languageId: string;
+    content: string;
+  } | null> {
+    const absPath = this.resolveFilePath(filePath);
+    const clients = await this.getClientsForFile(absPath);
+    if (clients.length === 0) return null;
+
+    const content = this.readFileContent(absPath);
+    if (content === null) return null;
+
+    return {
+      clients,
+      absPath,
+      uri: pathToFileURL(absPath).href,
+      languageId: this.getLanguageId(absPath),
+      content,
+    };
+  }
+
+  async touchFileAndWait(filePath: string, timeoutMs: number): Promise<Diagnostic[]> {
+    const loaded = await this.loadFileForClients(filePath);
+    if (!loaded) return [];
+
+    const { clients, absPath, uri, languageId, content } = loaded;
+
+    const waitPromises: Promise<void>[] = [];
+    for (const client of clients) {
+      client.diagnostics.delete(absPath);
+
+      const promise = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, timeoutMs);
+        const listeners = client.diagnosticsListeners.get(absPath) || [];
+        listeners.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+        client.diagnosticsListeners.set(absPath, listeners);
+      });
+      waitPromises.push(promise);
+    }
+
+    await this.sendDidOpenOrChange(clients, absPath, uri, languageId, content);
 
     await Promise.all(waitPromises);
 
@@ -453,6 +546,139 @@ export class LSPManager {
       if (diags) allDiagnostics.push(...diags);
     }
     return allDiagnostics;
+  }
+
+  async getDefinition(filePath: string, line: number, column: number): Promise<Location[]> {
+    const loaded = await this.loadFileForClients(filePath);
+    if (!loaded) return [];
+
+    const { clients, absPath, uri, languageId, content } = loaded;
+    await this.sendDidOpenOrChange(clients, absPath, uri, languageId, content);
+
+    const position = this.toPosition(line, column);
+
+    const results = await Promise.all(
+      clients.map(async (client) => {
+        try {
+          const result = (await client.connection.sendRequest("textDocument/definition", {
+            textDocument: { uri },
+            position,
+          })) as Location | Location[] | LocationLink[] | null;
+          return this.normalizeLocations(result);
+        } catch {
+          return [];
+        }
+      })
+    );
+
+    return results.flat();
+  }
+
+  async getReferences(filePath: string, line: number, column: number): Promise<Location[]> {
+    const loaded = await this.loadFileForClients(filePath);
+    if (!loaded) return [];
+
+    const { clients, absPath, uri, languageId, content } = loaded;
+    await this.sendDidOpenOrChange(clients, absPath, uri, languageId, content);
+
+    const position = this.toPosition(line, column);
+
+    const results = await Promise.all(
+      clients.map(async (client) => {
+        try {
+          const result = (await client.connection.sendRequest("textDocument/references", {
+            textDocument: { uri },
+            position,
+            context: { includeDeclaration: true },
+          })) as Location[] | Location | LocationLink[] | null;
+          return this.normalizeLocations(result);
+        } catch {
+          return [];
+        }
+      })
+    );
+
+    return results.flat();
+  }
+
+  async getHover(filePath: string, line: number, column: number): Promise<Hover | null> {
+    const loaded = await this.loadFileForClients(filePath);
+    if (!loaded) return null;
+
+    const { clients, absPath, uri, languageId, content } = loaded;
+    await this.sendDidOpenOrChange(clients, absPath, uri, languageId, content);
+
+    const position = this.toPosition(line, column);
+    const results = await Promise.all(
+      clients.map(async (client) => {
+        try {
+          return (await client.connection.sendRequest("textDocument/hover", {
+            textDocument: { uri },
+            position,
+          })) as Hover | null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    for (const result of results) {
+      if (result) return result;
+    }
+    return null;
+  }
+
+  async getSignatureHelp(
+    filePath: string,
+    line: number,
+    column: number
+  ): Promise<SignatureHelp | null> {
+    const loaded = await this.loadFileForClients(filePath);
+    if (!loaded) return null;
+
+    const { clients, absPath, uri, languageId, content } = loaded;
+    await this.sendDidOpenOrChange(clients, absPath, uri, languageId, content);
+
+    const position = this.toPosition(line, column);
+    const results = await Promise.all(
+      clients.map(async (client) => {
+        try {
+          return (await client.connection.sendRequest("textDocument/signatureHelp", {
+            textDocument: { uri },
+            position,
+          })) as SignatureHelp | null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    for (const result of results) {
+      if (result) return result;
+    }
+    return null;
+  }
+
+  async getDocumentSymbols(filePath: string): Promise<DocumentSymbol[]> {
+    const loaded = await this.loadFileForClients(filePath);
+    if (!loaded) return [];
+
+    const { clients, absPath, uri, languageId, content } = loaded;
+    await this.sendDidOpenOrChange(clients, absPath, uri, languageId, content);
+
+    const results = await Promise.all(
+      clients.map(async (client) => {
+        try {
+          return (await client.connection.sendRequest("textDocument/documentSymbol", {
+            textDocument: { uri },
+          })) as DocumentSymbol[] | SymbolInformation[] | null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    return results.flatMap((result) => this.normalizeSymbols(result));
   }
 
   async shutdown(): Promise<void> {

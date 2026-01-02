@@ -4,8 +4,9 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs";
-import type { Diagnostic } from "vscode-languageserver-types";
-import { LSPManager, LSP_SERVERS, formatDiagnostic } from "./lsp-core.js";
+import type { LSPManager } from "./lsp-core.js";
+import { LSP_SERVERS, formatDiagnostic } from "./lsp-core.js";
+import { getOrCreateManager, shutdownManager } from "./lsp-shared.js";
 
 // ============================================================================
 // Configuration
@@ -58,7 +59,7 @@ function updateLspStatus(state: LSPState): void {
 
 /** Handle session_start - initialize LSP manager and warm up servers */
 export function handleSessionStart(state: LSPState, ctx: any): void {
-  state.manager = new LSPManager(ctx.cwd);
+  state.manager = getOrCreateManager(ctx.cwd);
   state.statusUpdateFn =
     ctx.hasUI && ctx.ui.setStatus ? ctx.ui.setStatus.bind(ctx.ui) : null;
 
@@ -98,10 +99,8 @@ export function handleSessionStart(state: LSPState, ctx: any): void {
 
 /** Handle session_shutdown - clean up LSP connections */
 export async function handleSessionShutdown(state: LSPState): Promise<void> {
-  if (state.manager) {
-    await state.manager.shutdown();
-    state.manager = null;
-  }
+  await shutdownManager();
+  state.manager = null;
   state.activeClients.clear();
   if (state.statusUpdateFn) {
     state.statusUpdateFn("lsp", undefined);

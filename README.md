@@ -11,6 +11,9 @@ Add to `~/.pi/agent/settings.json`:
     "/path/to/pi-hooks/checkpoint/checkpoint.ts",
     "/path/to/pi-hooks/lsp/lsp.ts",
     "/path/to/pi-hooks/permission/permission.ts"
+  ],
+  "customTools": [
+    "/path/to/pi-hooks/lsp"
   ]
 }
 ```
@@ -32,11 +35,16 @@ Git-based checkpoint system for restoring code state when branching conversation
 
 ### `lsp/`
 
-Language Server Protocol diagnostics after file changes.
+Language Server Protocol integration (hook + tool).
 
+**Hook** (auto-diagnostics):
 - Runs LSP diagnostics after each `write`/`edit`
 - Supports web, Flutter, and common backend stacks
 - Manages LSP server lifecycles per project root
+
+**Tool** (on-demand queries):
+- Definitions, references, hover, symbols, diagnostics, signatures
+- Query by symbol name or line/column position
 
 <img src="assets/lsp-screenshot.png" alt="LSP Hook" width="500">
 
