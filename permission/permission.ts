@@ -47,7 +47,7 @@ export default function (pi: HookAPI) {
     handler: (args, ctx) => handlePermissionCommand(state, args, ctx),
   });
 
-  pi.on("session_start", async (event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     handleSessionStart(state, ctx);
   });
 
@@ -57,7 +57,12 @@ export default function (pi: HookAPI) {
     }
 
     if (event.toolName === "write" || event.toolName === "edit") {
-      return handleWriteToolCall(state, event.toolName, event.input.path as string, ctx);
+      return handleWriteToolCall({
+        state,
+        toolName: event.toolName,
+        filePath: event.input.path as string,
+        ctx,
+      });
     }
 
     return undefined;

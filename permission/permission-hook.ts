@@ -250,18 +250,26 @@ User can re-run with: PI_PERMISSION_LEVEL=${requiredLevel} pi -p "..."`
   return { block: true, reason: "Cancelled" };
 }
 
-/** Handle write/edit tool_call - check permission and prompt if needed */
+/** Options for handleWriteToolCall */
+export interface WriteToolCallOptions {
+  state: PermissionState;
+  toolName: string;
+  filePath: string;
+  ctx: any;
+}
+
+/** Handle write/edit tool_call and tool_before_apply - check permission and prompt if needed */
 export async function handleWriteToolCall(
-  state: PermissionState,
-  toolName: string,
-  filePath: string,
-  ctx: any
+  opts: WriteToolCallOptions
 ): Promise<{ block: true; reason: string } | undefined> {
+  const { state, toolName, filePath, ctx } = opts;
+  
   if (state.currentLevel === "bypassed") return undefined;
 
   if (LEVEL_INDEX[state.currentLevel] >= LEVEL_INDEX["low"]) return undefined;
 
   const action = toolName === "write" ? "Write" : "Edit";
+  const message = `Requires Low: ${action} ${filePath}`;
 
   // Print mode: block
   if (!ctx.hasUI) {
@@ -276,7 +284,7 @@ User can re-run with: PI_PERMISSION_LEVEL=low pi -p "..."`
   // Interactive mode: prompt
   playPermissionSound();
   const choice = await ctx.ui.select(
-    `Requires Low: ${action} ${filePath}`,
+    message,
     ["Allow once", "Allow all (Low)", "Cancel"]
   );
 
