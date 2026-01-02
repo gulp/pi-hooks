@@ -5,7 +5,7 @@
  */
 
 import { mkdtemp, rm, writeFile, readFile, mkdir } from "fs/promises";
-import { readdirSync } from "fs";
+import { readdirSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -13,6 +13,12 @@ import {
   getRepoRoot,
   createCheckpoint,
   restoreCheckpoint,
+  shouldIgnoreForSnapshot,
+  IGNORED_DIR_NAMES,
+  MAX_UNTRACKED_FILE_SIZE,
+  MAX_UNTRACKED_DIR_FILES,
+  isLargeFile,
+  isLargeDirectory,
 } from "../checkpoint-core.js";
 
 // ============================================================================
@@ -339,6 +345,371 @@ test("restore: complex state with mixed staged/unstaged/untracked", () =>
     assert(
       indexFiles.includes("to_delete.txt"),
       "to_delete.txt should be in index (staged before delete)"
+    );
+  }));
+
+// ============================================================================
+// Exclusion/filtering tests
+// ============================================================================
+
+test("shouldIgnoreForSnapshot: ignores node_modules at root", () =>
+  Promise.resolve().then(() => {
+    assert(
+      shouldIgnoreForSnapshot("node_modules/package/index.js"),
+      "Should ignore files in node_modules"
+    );
+  }));
+
+test("shouldIgnoreForSnapshot: ignores nested node_modules", () =>
+  Promise.resolve().then(() => {
+    assert(
+      shouldIgnoreForSnapshot("packages/app/node_modules/lodash/index.js"),
+      "Should ignore files in nested node_modules"
+    );
+  }));
+
+test("shouldIgnoreForSnapshot: ignores all known directories", () =>
+  Promise.resolve().then(() => {
+    for (const dir of IGNORED_DIR_NAMES) {
+      assert(
+        shouldIgnoreForSnapshot(`${dir}/file.txt`),
+        `Should ignore files in ${dir}`
+      );
+      assert(
+        shouldIgnoreForSnapshot(`foo/${dir}/bar.txt`),
+        `Should ignore nested files in ${dir}`
+      );
+    }
+  }));
+
+test("shouldIgnoreForSnapshot: does not ignore regular paths", () =>
+  Promise.resolve().then(() => {
+    assert(
+      !shouldIgnoreForSnapshot("src/index.ts"),
+      "Should not ignore regular src file"
+    );
+    assert(
+      !shouldIgnoreForSnapshot("lib/utils.js"),
+      "Should not ignore regular lib file"
+    );
+    assert(
+      !shouldIgnoreForSnapshot("my_node_modules/file.js"),
+      "Should not ignore path with node_modules as substring"
+    );
+  }));
+
+test("checkpoint: excludes node_modules from snapshot", () =>
+  withTestRepo(async (dir, root) => {
+    // Create node_modules directory (simulate npm install)
+    await mkdir(join(dir, "node_modules"));
+    await mkdir(join(dir, "node_modules", "lodash"));
+    await writeFile(
+      join(dir, "node_modules", "lodash", "index.js"),
+      "module.exports = {};"
+    );
+
+    // Also create a regular source file
+    await writeFile(join(dir, "src.ts"), "const x = 1;");
+
+    const cp = await createCheckpoint(root, "exclude-test", 0, "session-1");
+
+    // Verify that node_modules is tracked as pre-existing but excluded from tree
+    // The preexistingUntrackedFiles should NOT include node_modules files
+    // (they're filtered out because they're ignored)
+    assert(
+      !cp.preexistingUntrackedFiles?.some((f) =>
+        f.includes("node_modules")
+      ),
+      "preexistingUntrackedFiles should not include node_modules"
+    );
+
+    // Now mess up the state and restore
+    await writeFile(join(dir, "extra.txt"), "extra");
+    await restoreCheckpoint(root, cp);
+
+    // Verify node_modules still exists (wasn't deleted during restore)
+    const files = listFiles(dir);
+    assert(
+      files.includes("node_modules"),
+      "node_modules should still exist after restore"
+    );
+    assert(!files.includes("extra.txt"), "extra.txt should be removed");
+  }));
+
+test("restore: preserves pre-existing untracked files", () =>
+  withTestRepo(async (dir, root) => {
+    // Create an untracked file that exists before checkpoint
+    await writeFile(join(dir, "local-config.txt"), "my local config");
+
+    const cp = await createCheckpoint(root, "preserve-test", 0, "session-1");
+
+    // Verify the file is tracked as pre-existing
+    assert(
+      cp.preexistingUntrackedFiles?.includes("local-config.txt"),
+      "local-config.txt should be in preexistingUntrackedFiles"
+    );
+
+    // Add new files after checkpoint (these should be removed on restore)
+    await writeFile(join(dir, "new-after-checkpoint.txt"), "new file");
+
+    // Restore
+    await restoreCheckpoint(root, cp);
+
+    // Pre-existing untracked files should still exist
+    const files = listFiles(dir);
+    assert(
+      files.includes("local-config.txt"),
+      "Pre-existing untracked file should be preserved"
+    );
+    // New files should be removed
+    assert(
+      !files.includes("new-after-checkpoint.txt"),
+      "New untracked file should be removed"
+    );
+  }));
+
+test("restore: handles mixed pre-existing and new untracked files", () =>
+  withTestRepo(async (dir, root) => {
+    // Create pre-existing untracked files
+    await writeFile(join(dir, "existing1.txt"), "existing 1");
+    await writeFile(join(dir, "existing2.txt"), "existing 2");
+
+    const cp = await createCheckpoint(root, "mixed-test", 0, "session-1");
+
+    // Add new files and modify existing
+    await writeFile(join(dir, "new1.txt"), "new 1");
+    await writeFile(join(dir, "new2.txt"), "new 2");
+    await writeFile(join(dir, "existing1.txt"), "modified"); // modify pre-existing
+
+    // Restore
+    await restoreCheckpoint(root, cp);
+
+    const files = listFiles(dir);
+    // Pre-existing should be preserved (content restored to original)
+    assert(files.includes("existing1.txt"), "existing1.txt should exist");
+    assert(files.includes("existing2.txt"), "existing2.txt should exist");
+    assert(
+      (await readFile(join(dir, "existing1.txt"), "utf-8")) === "existing 1",
+      "existing1.txt content should be restored"
+    );
+    // New files should be removed
+    assert(!files.includes("new1.txt"), "new1.txt should be removed");
+    assert(!files.includes("new2.txt"), "new2.txt should be removed");
+  }));
+
+// ============================================================================
+// Large file/directory filtering tests
+// ============================================================================
+
+test("isLargeFile: returns false for small files", () =>
+  withTestRepo(async (dir, root) => {
+    await writeFile(join(dir, "small.txt"), "small content");
+    assert(!isLargeFile(root, "small.txt"), "Small file should not be large");
+  }));
+
+test("isLargeFile: returns true for files > 10 MiB", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a file just over 10 MiB
+    const largeContent = Buffer.alloc(MAX_UNTRACKED_FILE_SIZE + 1, "x");
+    await writeFile(join(dir, "large.bin"), largeContent);
+    assert(isLargeFile(root, "large.bin"), "File over 10 MiB should be large");
+  }));
+
+test("isLargeFile: returns false for files exactly at limit", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a file exactly at 10 MiB
+    const exactContent = Buffer.alloc(MAX_UNTRACKED_FILE_SIZE, "x");
+    await writeFile(join(dir, "exact.bin"), exactContent);
+    assert(!isLargeFile(root, "exact.bin"), "File exactly at 10 MiB should not be large");
+  }));
+
+test("isLargeDirectory: returns false for small directories", () =>
+  withTestRepo(async (dir, root) => {
+    await mkdir(join(dir, "smalldir"));
+    for (let i = 0; i < 10; i++) {
+      await writeFile(join(dir, "smalldir", `file${i}.txt`), `content ${i}`);
+    }
+    assert(!isLargeDirectory(root, "smalldir"), "Directory with 10 files should not be large");
+  }));
+
+test("isLargeDirectory: returns true for directories > 200 files", () =>
+  withTestRepo(async (dir, root) => {
+    await mkdir(join(dir, "largedir"));
+    // Create 201 files (just over the limit)
+    for (let i = 0; i < MAX_UNTRACKED_DIR_FILES + 1; i++) {
+      await writeFile(join(dir, "largedir", `file${i}.txt`), `content ${i}`);
+    }
+    assert(isLargeDirectory(root, "largedir"), "Directory with 201 files should be large");
+  }));
+
+test("isLargeDirectory: returns false for directories exactly at limit", () =>
+  withTestRepo(async (dir, root) => {
+    await mkdir(join(dir, "exactdir"));
+    // Create exactly 200 files
+    for (let i = 0; i < MAX_UNTRACKED_DIR_FILES; i++) {
+      await writeFile(join(dir, "exactdir", `file${i}.txt`), `content ${i}`);
+    }
+    assert(!isLargeDirectory(root, "exactdir"), "Directory with exactly 200 files should not be large");
+  }));
+
+test("checkpoint: excludes large files from snapshot", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a large file (> 10 MiB)
+    const largeContent = Buffer.alloc(MAX_UNTRACKED_FILE_SIZE + 1024, "x");
+    await writeFile(join(dir, "large-file.bin"), largeContent);
+    
+    // Also create a regular file
+    await writeFile(join(dir, "regular.txt"), "regular content");
+
+    const cp = await createCheckpoint(root, "large-file-test", 0, "session-1");
+
+    // Verify the large file is tracked as skipped
+    assert(
+      cp.skippedLargeFiles?.includes("large-file.bin"),
+      "large-file.bin should be in skippedLargeFiles"
+    );
+
+    // Verify the regular file is tracked as pre-existing
+    assert(
+      cp.preexistingUntrackedFiles?.includes("regular.txt"),
+      "regular.txt should be in preexistingUntrackedFiles"
+    );
+
+    // Large file should NOT be in preexistingUntrackedFiles
+    assert(
+      !cp.preexistingUntrackedFiles?.includes("large-file.bin"),
+      "large-file.bin should NOT be in preexistingUntrackedFiles"
+    );
+  }));
+
+test("checkpoint: excludes large directories from snapshot", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a large directory (> 200 files)
+    await mkdir(join(dir, "large-dir"));
+    for (let i = 0; i < MAX_UNTRACKED_DIR_FILES + 10; i++) {
+      await writeFile(join(dir, "large-dir", `file${i}.txt`), `content ${i}`);
+    }
+    
+    // Also create a regular file
+    await writeFile(join(dir, "regular.txt"), "regular content");
+
+    const cp = await createCheckpoint(root, "large-dir-test", 0, "session-1");
+
+    // Verify the large directory is tracked as skipped
+    assert(
+      cp.skippedLargeDirs?.includes("large-dir"),
+      "large-dir should be in skippedLargeDirs"
+    );
+
+    // Verify the regular file is tracked as pre-existing
+    assert(
+      cp.preexistingUntrackedFiles?.includes("regular.txt"),
+      "regular.txt should be in preexistingUntrackedFiles"
+    );
+
+    // Files from large-dir should NOT be in preexistingUntrackedFiles
+    assert(
+      !cp.preexistingUntrackedFiles?.some((f) => f.startsWith("large-dir/")),
+      "Files from large-dir should NOT be in preexistingUntrackedFiles"
+    );
+  }));
+
+test("restore: preserves large files on restore", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a large file (> 10 MiB)
+    const largeContent = Buffer.alloc(MAX_UNTRACKED_FILE_SIZE + 1024, "x");
+    await writeFile(join(dir, "large-file.bin"), largeContent);
+    
+    // Create a regular file
+    await writeFile(join(dir, "regular.txt"), "regular content");
+
+    const cp = await createCheckpoint(root, "preserve-large-file-test", 0, "session-1");
+
+    // Add a new file after checkpoint (should be removed on restore)
+    await writeFile(join(dir, "new-after.txt"), "new file");
+
+    // Restore
+    await restoreCheckpoint(root, cp);
+
+    // Verify large file still exists (preserved)
+    const files = listFiles(dir);
+    assert(
+      files.includes("large-file.bin"),
+      "Large file should be preserved after restore"
+    );
+    
+    // Verify regular file exists (restored from snapshot)
+    assert(
+      files.includes("regular.txt"),
+      "Regular file should exist after restore"
+    );
+
+    // New file should be removed
+    assert(
+      !files.includes("new-after.txt"),
+      "New file should be removed after restore"
+    );
+  }));
+
+test("restore: preserves large directories on restore", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a large directory (> 200 files)
+    await mkdir(join(dir, "large-dir"));
+    for (let i = 0; i < MAX_UNTRACKED_DIR_FILES + 10; i++) {
+      await writeFile(join(dir, "large-dir", `file${i}.txt`), `content ${i}`);
+    }
+    
+    // Create a regular file
+    await writeFile(join(dir, "regular.txt"), "regular content");
+
+    const cp = await createCheckpoint(root, "preserve-large-dir-test", 0, "session-1");
+
+    // Add a new file after checkpoint (should be removed on restore)
+    await writeFile(join(dir, "new-after.txt"), "new file");
+
+    // Restore
+    await restoreCheckpoint(root, cp);
+
+    // Verify large directory still exists (preserved)
+    const files = listFiles(dir);
+    assert(
+      files.includes("large-dir"),
+      "Large directory should be preserved after restore"
+    );
+    
+    // Verify regular file exists (restored from snapshot)
+    assert(
+      files.includes("regular.txt"),
+      "Regular file should exist after restore"
+    );
+
+    // New file should be removed
+    assert(
+      !files.includes("new-after.txt"),
+      "New file should be removed after restore"
+    );
+  }));
+
+test("restore: does not delete files added to large directory after checkpoint", () =>
+  withTestRepo(async (dir, root) => {
+    // Create a large directory (> 200 files)
+    await mkdir(join(dir, "large-dir"));
+    for (let i = 0; i < MAX_UNTRACKED_DIR_FILES + 10; i++) {
+      await writeFile(join(dir, "large-dir", `file${i}.txt`), `content ${i}`);
+    }
+
+    const cp = await createCheckpoint(root, "large-dir-new-files-test", 0, "session-1");
+
+    // Add a new file inside the large directory after checkpoint
+    await writeFile(join(dir, "large-dir", "new-file.txt"), "new content");
+
+    // Restore
+    await restoreCheckpoint(root, cp);
+
+    // Verify the new file in the large directory still exists (directory is preserved wholesale)
+    assert(
+      readdirSync(join(dir, "large-dir")).includes("new-file.txt"),
+      "New file in large directory should be preserved"
     );
   }));
 

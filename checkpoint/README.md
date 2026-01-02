@@ -54,6 +54,26 @@ npm test
 
 Checkpoints are stored as Git refs under `refs/pi-checkpoints/` and persist across sessions.
 
+## Smart Filtering
+
+To avoid bloating snapshots with large or generated files, the hook automatically excludes:
+
+### Ignored Directories
+These directories are never included in snapshots (even if not in `.gitignore`):
+- `node_modules`, `.venv`, `venv`, `env`, `.env`
+- `dist`, `build`
+- `.pytest_cache`, `.mypy_cache`, `.cache`, `.tox`, `__pycache__`
+
+### Size Limits
+- **Large files**: Untracked files larger than 10 MiB are excluded
+- **Large directories**: Untracked directories with more than 200 files are excluded
+
+### Safe Restore
+On restore, the hook **never deletes**:
+- Files in ignored directories
+- Large files/directories that were excluded from the snapshot
+- Pre-existing untracked files that existed when the checkpoint was created
+
 ## License
 
 MIT (see repository root)

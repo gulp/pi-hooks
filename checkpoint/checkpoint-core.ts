@@ -7,6 +7,7 @@
 
 import { exec, spawn } from "child_process";
 import { mkdtemp, rm } from "fs/promises";
+import { statSync, readdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -17,6 +18,32 @@ import { join } from "path";
 export const ZEROS = "0".repeat(40);
 export const REF_BASE = "refs/pi-checkpoints";
 
+/** Maximum size for untracked files to be included in snapshot (10 MiB) */
+export const MAX_UNTRACKED_FILE_SIZE = 10 * 1024 * 1024; // 10 MiB
+
+/** Maximum number of files in an untracked directory to be included in snapshot */
+export const MAX_UNTRACKED_DIR_FILES = 200;
+
+/**
+ * Directories to exclude from checkpoint snapshots.
+ * Based on Codex's ghost commit implementation.
+ * These are matched against any path component (e.g., foo/node_modules/bar is excluded).
+ */
+export const IGNORED_DIR_NAMES = new Set([
+  "node_modules",
+  ".venv",
+  "venv",
+  "env",
+  ".env",
+  "dist",
+  "build",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".cache",
+  ".tox",
+  "__pycache__",
+]);
+
 export interface CheckpointData {
   id: string;
   turnIndex: number;
@@ -25,6 +52,12 @@ export interface CheckpointData {
   indexTreeSha: string;
   worktreeTreeSha: string;
   timestamp: number;
+  /** Untracked files that existed when snapshot was created (for safe restore) */
+  preexistingUntrackedFiles?: string[];
+  /** Untracked files that were skipped due to size limits (> 10 MiB) */
+  skippedLargeFiles?: string[];
+  /** Untracked directories that were skipped due to file count limits (> 200 files) */
+  skippedLargeDirs?: string[];
 }
 
 // ============================================================================
@@ -103,6 +136,211 @@ export const getRepoRoot = (cwd: string) =>
   git("rev-parse --show-toplevel", cwd);
 
 // ============================================================================
+// Path filtering
+// ============================================================================
+
+/**
+ * Check if a path should be ignored for snapshot.
+ * Returns true if ANY path component matches IGNORED_DIR_NAMES.
+ * @param path - File path (relative to repo root)
+ */
+export function shouldIgnoreForSnapshot(path: string): boolean {
+  // Split on both forward and back slashes for cross-platform support
+  const components = path.split(/[/\\]/);
+  return components.some((component) => IGNORED_DIR_NAMES.has(component));
+}
+
+/**
+ * Check if a file is too large to include in snapshot.
+ * @param root - Repository root path
+ * @param relativePath - File path relative to repo root
+ * @returns true if file exceeds MAX_UNTRACKED_FILE_SIZE
+ */
+export function isLargeFile(root: string, relativePath: string): boolean {
+  try {
+    const fullPath = join(root, relativePath);
+    const stats = statSync(fullPath);
+    return stats.isFile() && stats.size > MAX_UNTRACKED_FILE_SIZE;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Count files recursively in a directory.
+ * @param dirPath - Full path to directory
+ * @param maxCount - Stop counting after this many files (optimization)
+ * @returns Number of files (capped at maxCount + 1)
+ */
+function countFilesInDirectory(dirPath: string, maxCount: number): number {
+  let count = 0;
+
+  function countRecursive(currentPath: string): void {
+    if (count > maxCount) return; // Early exit optimization
+
+    try {
+      const entries = readdirSync(currentPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (count > maxCount) return;
+        const fullPath = join(currentPath, entry.name);
+        if (entry.isDirectory()) {
+          countRecursive(fullPath);
+        } else if (entry.isFile()) {
+          count++;
+        }
+      }
+    } catch {
+      // Ignore permission errors etc.
+    }
+  }
+
+  countRecursive(dirPath);
+  return count;
+}
+
+/**
+ * Check if an untracked directory has too many files to include in snapshot.
+ * @param root - Repository root path
+ * @param relativePath - Directory path relative to repo root
+ * @returns true if directory contains more than MAX_UNTRACKED_DIR_FILES files
+ */
+export function isLargeDirectory(root: string, relativePath: string): boolean {
+  try {
+    const fullPath = join(root, relativePath);
+    const stats = statSync(fullPath);
+    if (!stats.isDirectory()) return false;
+
+    const fileCount = countFilesInDirectory(fullPath, MAX_UNTRACKED_DIR_FILES);
+    return fileCount > MAX_UNTRACKED_DIR_FILES;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the top-level directory of a path.
+ * @param path - File path (relative to repo root)
+ * @returns Top-level directory or empty string if at root
+ */
+function getTopLevelDir(path: string): string {
+  const components = path.split(/[/\\]/);
+  return components.length > 1 ? components[0] : "";
+}
+
+/**
+ * Get list of untracked files (excluding ignored directories).
+ * Note: This always uses the real git index to determine untracked status.
+ * @param root - Repository root path
+ */
+async function getUntrackedFiles(
+  root: string
+): Promise<string[]> {
+  try {
+    // Get untracked files (respects .gitignore)
+    // Don't pass custom env - we want to use the real index
+    const output = await git("ls-files --others --exclude-standard", root);
+    if (!output) return [];
+    return output.split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Result of getFilesToAdd with filtering information
+ */
+interface FilesToAddResult {
+  /** Files to add to the snapshot (after all filtering) */
+  filtered: string[];
+  /** All untracked files (before filtering) */
+  allUntracked: string[];
+  /** Large files that were skipped (> 10 MiB) */
+  skippedLargeFiles: string[];
+  /** Large directories that were skipped (> 200 files) */
+  skippedLargeDirs: string[];
+}
+
+/**
+ * Get all files that would be added by `git add -A`, filtered by ignore list and size limits.
+ * Note: This function uses the REAL git index (not a temporary one) to determine
+ * which files are tracked/untracked. The env parameter is NOT passed to git commands
+ * that query the index state.
+ * @param root - Repository root path
+ */
+async function getFilesToAdd(
+  root: string
+): Promise<FilesToAddResult> {
+  // Get modified/deleted tracked files (use real index, not temporary)
+  const modifiedOutput = await git(
+    "diff --name-only",
+    root
+  ).catch(() => "");
+
+  // Get staged files (use real index, not temporary)
+  const stagedOutput = await git(
+    "diff --cached --name-only",
+    root
+  ).catch(() => "");
+
+  // Get untracked files (use real index, not temporary)
+  const allUntracked = await getUntrackedFiles(root);
+
+  // Identify large directories from untracked files
+  // We need to check top-level untracked directories
+  const untrackedTopDirs = new Set<string>();
+  for (const file of allUntracked) {
+    const topDir = getTopLevelDir(file);
+    if (topDir) {
+      untrackedTopDirs.add(topDir);
+    }
+  }
+
+  // Check which top-level directories are too large
+  const skippedLargeDirs: string[] = [];
+  for (const dir of untrackedTopDirs) {
+    if (isLargeDirectory(root, dir)) {
+      skippedLargeDirs.push(dir);
+    }
+  }
+  const skippedLargeDirsSet = new Set(skippedLargeDirs);
+
+  // Identify large files from untracked files
+  const skippedLargeFiles: string[] = [];
+  for (const file of allUntracked) {
+    const topDir = getTopLevelDir(file);
+    // Skip if already in a large directory
+    if (topDir && skippedLargeDirsSet.has(topDir)) continue;
+    // Check if file itself is too large
+    if (isLargeFile(root, file)) {
+      skippedLargeFiles.push(file);
+    }
+  }
+  const skippedLargeFilesSet = new Set(skippedLargeFiles);
+
+  // Combine all files
+  const allFiles = new Set<string>();
+
+  if (modifiedOutput) {
+    modifiedOutput.split("\n").filter(Boolean).forEach((f) => allFiles.add(f));
+  }
+  if (stagedOutput) {
+    stagedOutput.split("\n").filter(Boolean).forEach((f) => allFiles.add(f));
+  }
+  allUntracked.forEach((f) => allFiles.add(f));
+
+  // Filter out ignored paths, large files, and files in large directories
+  const filtered = [...allFiles].filter((f) => {
+    if (shouldIgnoreForSnapshot(f)) return false;
+    if (skippedLargeFilesSet.has(f)) return false;
+    const topDir = getTopLevelDir(f);
+    if (topDir && skippedLargeDirsSet.has(topDir)) return false;
+    return true;
+  });
+
+  return { filtered, allUntracked, skippedLargeFiles, skippedLargeDirs };
+}
+
+// ============================================================================
 // Checkpoint operations
 // ============================================================================
 
@@ -123,8 +361,47 @@ export async function createCheckpoint(
 
   try {
     const tmpEnv = { ...process.env, GIT_INDEX_FILE: tmpIndex };
-    await git("add -A .", root, { env: tmpEnv });
+
+    // Get files to add, filtering out ignored directories, large files, and large directories
+    // Note: getFilesToAdd uses the real git index to determine tracked/untracked status
+    const { filtered: filesToAdd, allUntracked, skippedLargeFiles, skippedLargeDirs } = await getFilesToAdd(
+      root
+    );
+
+    // Filter untracked files to only include non-ignored, non-large ones for restore tracking
+    const skippedLargeDirsSet = new Set(skippedLargeDirs);
+    const skippedLargeFilesSet = new Set(skippedLargeFiles);
+    const preexistingUntrackedFiles = allUntracked.filter((f) => {
+      if (shouldIgnoreForSnapshot(f)) return false;
+      if (skippedLargeFilesSet.has(f)) return false;
+      const topDir = getTopLevelDir(f);
+      if (topDir && skippedLargeDirsSet.has(topDir)) return false;
+      return true;
+    });
+
+    // Start with tracked files from HEAD (if it exists)
+    if (headSha !== ZEROS) {
+      await git(`read-tree ${headSha}`, root, { env: tmpEnv });
+    }
+
+    // Add filtered files to the temporary index
+    if (filesToAdd.length > 0) {
+      // Add files in batches to avoid command line length limits
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < filesToAdd.length; i += BATCH_SIZE) {
+        const batch = filesToAdd.slice(i, i + BATCH_SIZE);
+        // Use -- to separate paths from options
+        const pathArgs = batch.map((f) => `"${f}"`).join(" ");
+        await git(`add -f -- ${pathArgs}`, root, { env: tmpEnv });
+      }
+    }
+
     const worktreeTreeSha = await git("write-tree", root, { env: tmpEnv });
+
+    // Encode data as JSON for storage in commit message
+    const untrackedJson = JSON.stringify(preexistingUntrackedFiles);
+    const largeFilesJson = JSON.stringify(skippedLargeFiles);
+    const largeDirsJson = JSON.stringify(skippedLargeDirs);
 
     const message = [
       `checkpoint:${id}`,
@@ -134,6 +411,9 @@ export async function createCheckpoint(
       `index-tree ${indexTreeSha}`,
       `worktree-tree ${worktreeTreeSha}`,
       `created ${isoTimestamp}`,
+      `untracked ${untrackedJson}`,
+      `largeFiles ${largeFilesJson}`,
+      `largeDirs ${largeDirsJson}`,
     ].join("\n");
 
     const commitEnv = {
@@ -161,6 +441,9 @@ export async function createCheckpoint(
       indexTreeSha,
       worktreeTreeSha,
       timestamp,
+      preexistingUntrackedFiles,
+      skippedLargeFiles: skippedLargeFiles.length > 0 ? skippedLargeFiles : undefined,
+      skippedLargeDirs: skippedLargeDirs.length > 0 ? skippedLargeDirs : undefined,
     };
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -179,11 +462,99 @@ export async function restoreCheckpoint(
   // 2. Update index AND working tree to match saved worktree snapshot
   await git(`read-tree --reset -u ${cp.worktreeTreeSha}`, root);
 
-  // 3. Remove any extra untracked files not present in the snapshot
-  await git("clean -fd", root);
+  // 3. Safely remove untracked files - only remove NEW files, not pre-existing ones
+  //    Also preserve large files and directories that were skipped during snapshot
+  await safeCleanUntrackedFiles(
+    root,
+    cp.preexistingUntrackedFiles || [],
+    cp.skippedLargeFiles || [],
+    cp.skippedLargeDirs || []
+  );
 
   // 4. Restore the index (staged state) without touching files
   await git(`read-tree --reset ${cp.indexTreeSha}`, root);
+}
+
+/**
+ * Safely clean untracked files, preserving those that existed before the snapshot.
+ * This prevents deleting files in ignored directories (like node_modules) that
+ * the user had before the checkpoint was created.
+ *
+ * @param root - Repository root path
+ * @param preexistingFiles - Files that existed when the checkpoint was created
+ * @param skippedLargeFiles - Large files that were skipped during snapshot (preserved)
+ * @param skippedLargeDirs - Large directories that were skipped during snapshot (preserved)
+ */
+async function safeCleanUntrackedFiles(
+  root: string,
+  preexistingFiles: string[],
+  skippedLargeFiles: string[] = [],
+  skippedLargeDirs: string[] = []
+): Promise<void> {
+  // Get current untracked files
+  const currentUntracked = await getUntrackedFiles(root);
+
+  if (currentUntracked.length === 0) return;
+
+  // Create sets for fast lookup
+  const preexistingSet = new Set(preexistingFiles);
+  const skippedLargeFilesSet = new Set(skippedLargeFiles);
+  const skippedLargeDirsSet = new Set(skippedLargeDirs);
+
+  // Find files that are NEW (not in the pre-existing set) and should be removed
+  // Also filter out:
+  // - files in ignored directories - we never want to delete those
+  // - large files that were skipped during snapshot
+  // - files in large directories that were skipped during snapshot
+  const filesToRemove = currentUntracked.filter((f) => {
+    if (preexistingSet.has(f)) return false;
+    if (shouldIgnoreForSnapshot(f)) return false;
+    if (skippedLargeFilesSet.has(f)) return false;
+    const topDir = getTopLevelDir(f);
+    if (topDir && skippedLargeDirsSet.has(topDir)) return false;
+    return true;
+  });
+
+  if (filesToRemove.length === 0) return;
+
+  // Remove files in batches
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < filesToRemove.length; i += BATCH_SIZE) {
+    const batch = filesToRemove.slice(i, i + BATCH_SIZE);
+    const pathArgs = batch.map((f) => `"${f}"`).join(" ");
+    // Use git clean with specific paths instead of -fd on everything
+    await git(`clean -f -- ${pathArgs}`, root).catch(() => {
+      // If batch fails, try individual files
+    });
+  }
+
+  // Also clean empty directories that may have been left behind
+  // But only if they're not in ignored paths, skipped large directories, or skipped large files
+  await git("clean -fd --dry-run", root)
+    .then(async (output) => {
+      const pathsToClean = output
+        .split("\n")
+        .filter((line) => line.startsWith("Would remove "))
+        .map((line) => line.replace("Would remove ", "").replace(/\/$/, ""))
+        .filter((path) => {
+          if (shouldIgnoreForSnapshot(path)) return false;
+          // Don't clean skipped large files
+          if (skippedLargeFilesSet.has(path)) return false;
+          // Don't clean skipped large directories
+          if (skippedLargeDirsSet.has(path)) return false;
+          // Don't clean if it's inside a skipped large directory
+          const topDir = getTopLevelDir(path);
+          if (topDir && skippedLargeDirsSet.has(topDir)) return false;
+          return true;
+        });
+
+      if (pathsToClean.length > 0) {
+        for (const path of pathsToClean) {
+          await git(`clean -fd -- "${path}"`, root).catch(() => {});
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 export async function loadCheckpointFromRef(
@@ -208,8 +579,43 @@ export async function loadCheckpointFromRef(
     const index = get("index-tree");
     const worktree = get("worktree-tree");
     const created = get("created");
+    const untrackedJson = get("untracked");
+    const largeFilesJson = get("largeFiles");
+    const largeDirsJson = get("largeDirs");
 
     if (!sessionId || !turn || !head || !index || !worktree) return null;
+
+    // Parse pre-existing untracked files from JSON (if present)
+    let preexistingUntrackedFiles: string[] | undefined;
+    if (untrackedJson) {
+      try {
+        preexistingUntrackedFiles = JSON.parse(untrackedJson);
+      } catch {
+        // Ignore parse errors for backwards compatibility
+      }
+    }
+
+    // Parse skipped large files from JSON (if present)
+    let skippedLargeFiles: string[] | undefined;
+    if (largeFilesJson) {
+      try {
+        const parsed = JSON.parse(largeFilesJson);
+        if (parsed.length > 0) skippedLargeFiles = parsed;
+      } catch {
+        // Ignore parse errors for backwards compatibility
+      }
+    }
+
+    // Parse skipped large directories from JSON (if present)
+    let skippedLargeDirs: string[] | undefined;
+    if (largeDirsJson) {
+      try {
+        const parsed = JSON.parse(largeDirsJson);
+        if (parsed.length > 0) skippedLargeDirs = parsed;
+      } catch {
+        // Ignore parse errors for backwards compatibility
+      }
+    }
 
     return {
       id: refName,
@@ -219,6 +625,9 @@ export async function loadCheckpointFromRef(
       indexTreeSha: index,
       worktreeTreeSha: worktree,
       timestamp: created ? new Date(created).getTime() : 0,
+      preexistingUntrackedFiles,
+      skippedLargeFiles,
+      skippedLargeDirs,
     };
   } catch {
     return null;
