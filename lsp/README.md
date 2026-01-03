@@ -7,6 +7,7 @@ Language Server Protocol integration for pi-coding-agent.
 - **Hook**: Runs `write`/`edit` results through the matching LSP and appends diagnostics to tool output
 - **Tool**: On-demand LSP queries (definitions, references, hover, symbols, diagnostics, signatures)
 - Manages one LSP server per project root and reuses them across turns
+- **Efficient**: Bounded memory usage via LRU cache and idle file cleanup
 - Supports TypeScript/JavaScript, Vue, Svelte, Dart/Flutter, Python, Go, and Rust
 
 ## Supported Languages
@@ -91,6 +92,8 @@ The hook spawns binaries from your PATH.
 2. After each `write`/`edit`, sends file to LSP and waits for diagnostics
 3. Appends errors/warnings to tool result so agent can fix them
 4. Shows notification with diagnostic summary
+5. **Memory Management**: Keeps up to 30 files open per LSP server (LRU eviction) and automatically closes idle files (> 60s) to prevent memory bloat in long-running sessions.
+6. **Robustness**: Reuses cached diagnostics if a server doesn't re-publish them for unchanged files, avoiding false timeouts on re-analysis.
 
 ### Tool (on-demand queries)
 
