@@ -348,7 +348,7 @@ const MINIMAL_COMMANDS = new Set([
   // Info
   "echo", "printf", "whoami", "id", "date", "cal", "uname", "hostname", "uptime",
   "type", "file", "stat", "wc", "du", "df", "free",
-  "ps", "top", "htop", "pgrep",
+  "ps", "top", "htop", "pgrep", "sleep",
   "env", "printenv", "set",
   // Man/help
   "man", "help", "info",

@@ -118,6 +118,7 @@ test("minimal: process commands", async () => {
   assertLevel("top -l 1", "minimal");
   assertLevel("htop", "minimal");
   assertLevel("pgrep node", "minimal");
+  assertLevel("sleep 4", "minimal");
 });
 
 test("minimal: environment commands", async () => {
@@ -614,6 +615,7 @@ test("complex: chained commands with ||", async () => {
 
 test("complex: chained commands with ;", async () => {
   assertLevel("cd dir; ls", "minimal");
+  assertLevel("sleep 4; tail -n 200 /tmp/widget-preview.log", "minimal");
   assertLevel("npm install; npm test", "medium");
 });
 
