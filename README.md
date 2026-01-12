@@ -10,7 +10,8 @@ Add to `~/.pi/agent/settings.json`:
   "extensions": [
     "/path/to/pi-hooks/checkpoint",
     "/path/to/pi-hooks/lsp",
-    "/path/to/pi-hooks/permission"
+    "/path/to/pi-hooks/permission",
+    "/path/to/pi-hooks/ralph-loop"
   ]
 }
 ```
@@ -74,6 +75,14 @@ On first run you pick a level; it's saved globally. You can escalate mid-session
 
 <img src="assets/permission-screenshot.png" alt="Permission Extension" width="500">
 
+### `ralph-loop/`
+
+Looped subagent execution via the `ralph_loop` tool.
+
+- Runs single, parallel, or chain subagent tasks until a condition returns false
+- Supports `conditionCommand`, `maxIterations`, and `sleepMs` controls
+- Defaults to the `worker` agent and the last user prompt when omitted
+
 ## Usage
 
 1. Install dependencies for extensions that need them:
@@ -88,6 +97,7 @@ On first run you pick a level; it's saved globally. You can escalate mid-session
    cp -r checkpoint .pi/extensions/
    cp -r lsp .pi/extensions/
    cp -r permission .pi/extensions/
+   cp -r ralph-loop .pi/extensions/
    ```
    pi automatically loads extensions from `.pi/extensions/`.
 
@@ -97,6 +107,7 @@ On first run you pick a level; it's saved globally. You can escalate mid-session
    cp -r checkpoint ~/.pi/agent/extensions/
    cp -r lsp ~/.pi/agent/extensions/
    cp -r permission ~/.pi/agent/extensions/
+   cp -r ralph-loop ~/.pi/agent/extensions/
    ```
    
    Or via `~/.pi/agent/settings.json`:
@@ -105,7 +116,8 @@ On first run you pick a level; it's saved globally. You can escalate mid-session
      "extensions": [
        "/absolute/path/to/pi-hooks/checkpoint",
        "/absolute/path/to/pi-hooks/lsp",
-       "/absolute/path/to/pi-hooks/permission"
+       "/absolute/path/to/pi-hooks/permission",
+       "/absolute/path/to/pi-hooks/ralph-loop"
      ]
    }
    ```
