@@ -9,6 +9,7 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { calculateCost } from "../models.js";
+import { getEnvApiKey } from "../stream.js";
 import type {
 	AssistantMessage,
 	Context,
@@ -98,7 +99,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 		};
 
 		try {
-			const client = createClient(model, context, options?.apiKey);
+			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			const client = createClient(model, context, apiKey);
 			const params = buildParams(model, context, options);
 			const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
 			stream.push({ type: "start", partial: output });
@@ -194,34 +196,44 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 					// Some endpoints return reasoning in reasoning_content (llama.cpp),
 					// or reasoning (other openai compatible endpoints)
+					// Use the first non-empty reasoning field to avoid duplication
+					// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
 					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+					let foundReasoningField: string | null = null;
 					for (const field of reasoningFields) {
 						if (
 							(choice.delta as any)[field] !== null &&
 							(choice.delta as any)[field] !== undefined &&
 							(choice.delta as any)[field].length > 0
 						) {
-							if (!currentBlock || currentBlock.type !== "thinking") {
-								finishCurrentBlock(currentBlock);
-								currentBlock = {
-									type: "thinking",
-									thinking: "",
-									thinkingSignature: field,
-								};
-								output.content.push(currentBlock);
-								stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+							if (!foundReasoningField) {
+								foundReasoningField = field;
+								break;
 							}
+						}
+					}
 
-							if (currentBlock.type === "thinking") {
-								const delta = (choice.delta as any)[field];
-								currentBlock.thinking += delta;
-								stream.push({
-									type: "thinking_delta",
-									contentIndex: blockIndex(),
-									delta,
-									partial: output,
-								});
-							}
+					if (foundReasoningField) {
+						if (!currentBlock || currentBlock.type !== "thinking") {
+							finishCurrentBlock(currentBlock);
+							currentBlock = {
+								type: "thinking",
+								thinking: "",
+								thinkingSignature: foundReasoningField,
+							};
+							output.content.push(currentBlock);
+							stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+						}
+
+						if (currentBlock.type === "thinking") {
+							const delta = (choice.delta as any)[foundReasoningField];
+							currentBlock.thinking += delta;
+							stream.push({
+								type: "thinking_delta",
+								contentIndex: blockIndex(),
+								delta,
+								partial: output,
+							});
 						}
 					}
 
@@ -295,6 +307,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			// Some providers via OpenRouter give additional information in this field.
+			const rawMetadata = (error as any)?.error?.metadata?.raw;
+			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -355,8 +370,11 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		model: model.id,
 		messages,
 		stream: true,
-		stream_options: { include_usage: true },
 	};
+
+	if (compat.supportsUsageInStreaming !== false) {
+		(params as any).stream_options = { include_usage: true };
+	}
 
 	if (compat.supportsStore) {
 		params.store = false;
@@ -458,13 +476,15 @@ function convertMessages(
 			};
 
 			const textBlocks = msg.content.filter((b) => b.type === "text") as TextContent[];
-			if (textBlocks.length > 0) {
+			// Filter out empty text blocks to avoid API validation errors
+			const nonEmptyTextBlocks = textBlocks.filter((b) => b.text && b.text.trim().length > 0);
+			if (nonEmptyTextBlocks.length > 0) {
 				// GitHub Copilot requires assistant content as a string, not an array.
 				// Sending as array causes Claude models to re-answer all previous prompts.
 				if (model.provider === "github-copilot") {
-					assistantMsg.content = textBlocks.map((b) => sanitizeSurrogates(b.text)).join("");
+					assistantMsg.content = nonEmptyTextBlocks.map((b) => sanitizeSurrogates(b.text)).join("");
 				} else {
-					assistantMsg.content = textBlocks.map((b) => {
+					assistantMsg.content = nonEmptyTextBlocks.map((b) => {
 						return { type: "text", text: sanitizeSurrogates(b.text) };
 					});
 				}
@@ -472,10 +492,12 @@ function convertMessages(
 
 			// Handle thinking blocks
 			const thinkingBlocks = msg.content.filter((b) => b.type === "thinking") as ThinkingContent[];
-			if (thinkingBlocks.length > 0) {
+			// Filter out empty thinking blocks to avoid API validation errors
+			const nonEmptyThinkingBlocks = thinkingBlocks.filter((b) => b.thinking && b.thinking.trim().length > 0);
+			if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
-					// Convert thinking blocks to text with <thinking> delimiters
-					const thinkingText = thinkingBlocks.map((b) => `<thinking>\n${b.thinking}\n</thinking>`).join("\n");
+					// Convert thinking blocks to plain text (no tags to avoid model mimicking them)
+					const thinkingText = nonEmptyThinkingBlocks.map((b) => b.thinking).join("\n\n");
 					const textContent = assistantMsg.content as Array<{ type: "text"; text: string }> | null;
 					if (textContent) {
 						textContent.unshift({ type: "text", text: thinkingText });
@@ -484,9 +506,9 @@ function convertMessages(
 					}
 				} else {
 					// Use the signature from the first thinking block if available (for llama.cpp server + gpt-oss)
-					const signature = thinkingBlocks[0].thinkingSignature;
+					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
 					if (signature && signature.length > 0) {
-						(assistantMsg as any)[signature] = thinkingBlocks.map((b) => b.thinking).join("\n");
+						(assistantMsg as any)[signature] = nonEmptyThinkingBlocks.map((b) => b.thinking).join("\n");
 					}
 				}
 			}
@@ -593,6 +615,7 @@ function convertTools(tools: Tool[]): OpenAI.Chat.Completions.ChatCompletionTool
 			name: tool.name,
 			description: tool.description,
 			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
+			strict: false, // Disable strict mode to allow optional parameters without null unions
 		},
 	}));
 }
@@ -637,6 +660,7 @@ function detectCompatFromUrl(baseUrl: string): Required<OpenAICompat> {
 		supportsStore: !isNonStandard,
 		supportsDeveloperRole: !isNonStandard,
 		supportsReasoningEffort: !isGrok,
+		supportsUsageInStreaming: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: false, // Mistral no longer requires this as of Dec 2024
@@ -657,6 +681,7 @@ function getCompat(model: Model<"openai-completions">): Required<OpenAICompat> {
 		supportsStore: model.compat.supportsStore ?? detected.supportsStore,
 		supportsDeveloperRole: model.compat.supportsDeveloperRole ?? detected.supportsDeveloperRole,
 		supportsReasoningEffort: model.compat.supportsReasoningEffort ?? detected.supportsReasoningEffort,
+		supportsUsageInStreaming: model.compat.supportsUsageInStreaming ?? detected.supportsUsageInStreaming,
 		maxTokensField: model.compat.maxTokensField ?? detected.maxTokensField,
 		requiresToolResultName: model.compat.requiresToolResultName ?? detected.requiresToolResultName,
 		requiresAssistantAfterToolResult:

@@ -18,6 +18,16 @@ import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
 import type { AssistantMessage, Context, Model, Usage } from "../src/types.js";
 import { isContextOverflow } from "../src/utils/overflow.js";
+import { resolveApiKey } from "./oauth.js";
+
+// Resolve OAuth tokens at module level (async, runs before tests)
+const oauthTokens = await Promise.all([
+	resolveApiKey("github-copilot"),
+	resolveApiKey("google-gemini-cli"),
+	resolveApiKey("google-antigravity"),
+	resolveApiKey("openai-codex"),
+]);
+const [githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 // Lorem ipsum paragraph for realistic token estimation
 const LOREM_IPSUM = `Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. `;
@@ -112,6 +122,43 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
+	// GitHub Copilot (OAuth)
+	// Tests both OpenAI and Anthropic models via Copilot
+	// =============================================================================
+
+	describe("GitHub Copilot (OAuth)", () => {
+		// OpenAI model via Copilot
+		it.skipIf(!githubCopilotToken)(
+			"gpt-4o - should detect overflow via isContextOverflow",
+			async () => {
+				const model = getModel("github-copilot", "gpt-4o");
+				const result = await testContextOverflow(model, githubCopilotToken!);
+				logResult(result);
+
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toMatch(/exceeds the limit of \d+/i);
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			},
+			120000,
+		);
+
+		// Anthropic model via Copilot
+		it.skipIf(!githubCopilotToken)(
+			"claude-sonnet-4 - should detect overflow via isContextOverflow",
+			async () => {
+				const model = getModel("github-copilot", "claude-sonnet-4");
+				const result = await testContextOverflow(model, githubCopilotToken!);
+				logResult(result);
+
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toMatch(/exceeds the limit of \d+/i);
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			},
+			120000,
+		);
+	});
+
+	// =============================================================================
 	// OpenAI
 	// Expected pattern: "exceeds the context window"
 	// =============================================================================
@@ -156,6 +203,85 @@ describe("Context overflow error handling", () => {
 			expect(result.errorMessage).toMatch(/input token count.*exceeds the maximum/i);
 			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
 		}, 120000);
+	});
+
+	// =============================================================================
+	// Google Gemini CLI (OAuth)
+	// Uses same API as Google, expects same error pattern
+	// =============================================================================
+
+	describe("Google Gemini CLI (OAuth)", () => {
+		it.skipIf(!geminiCliToken)(
+			"gemini-2.5-flash - should detect overflow via isContextOverflow",
+			async () => {
+				const model = getModel("google-gemini-cli", "gemini-2.5-flash");
+				const result = await testContextOverflow(model, geminiCliToken!);
+				logResult(result);
+
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toMatch(/input token count.*exceeds the maximum/i);
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			},
+			120000,
+		);
+	});
+
+	// =============================================================================
+	// Google Antigravity (OAuth)
+	// Tests both Gemini and Anthropic models via Antigravity
+	// =============================================================================
+
+	describe("Google Antigravity (OAuth)", () => {
+		// Gemini model
+		it.skipIf(!antigravityToken)(
+			"gemini-3-flash - should detect overflow via isContextOverflow",
+			async () => {
+				const model = getModel("google-antigravity", "gemini-3-flash");
+				const result = await testContextOverflow(model, antigravityToken!);
+				logResult(result);
+
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toMatch(/input token count.*exceeds the maximum/i);
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			},
+			120000,
+		);
+
+		// Anthropic model via Antigravity
+		it.skipIf(!antigravityToken)(
+			"claude-sonnet-4-5 - should detect overflow via isContextOverflow",
+			async () => {
+				const model = getModel("google-antigravity", "claude-sonnet-4-5");
+				const result = await testContextOverflow(model, antigravityToken!);
+				logResult(result);
+
+				expect(result.stopReason).toBe("error");
+				// Anthropic models return "prompt is too long" pattern
+				expect(result.errorMessage).toMatch(/prompt is too long/i);
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			},
+			120000,
+		);
+	});
+
+	// =============================================================================
+	// OpenAI Codex (OAuth)
+	// Uses ChatGPT Plus/Pro subscription via OAuth
+	// =============================================================================
+
+	describe("OpenAI Codex (OAuth)", () => {
+		it.skipIf(!openaiCodexToken)(
+			"gpt-5.2-codex - should detect overflow via isContextOverflow",
+			async () => {
+				const model = getModel("openai-codex", "gpt-5.2-codex");
+				const result = await testContextOverflow(model, openaiCodexToken!);
+				logResult(result);
+
+				expect(result.stopReason).toBe("error");
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			},
+			120000,
+		);
 	});
 
 	// =============================================================================
@@ -204,8 +330,8 @@ describe("Context overflow error handling", () => {
 			logResult(result);
 
 			expect(result.stopReason).toBe("error");
-			// Cerebras returns status code with no body
-			expect(result.errorMessage).toMatch(/4(00|13).*\(no body\)/i);
+			// Cerebras returns status code with no body (400, 413, or 429 for token rate limit)
+			expect(result.errorMessage).toMatch(/4(00|13|29).*\(no body\)/i);
 			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
 		}, 120000);
 	});
@@ -319,13 +445,15 @@ describe("Context overflow error handling", () => {
 	// Ollama (local)
 	// =============================================================================
 
-	// Check if ollama is installed
+	// Check if ollama is installed and local LLM tests are enabled
 	let ollamaInstalled = false;
-	try {
-		execSync("which ollama", { stdio: "ignore" });
-		ollamaInstalled = true;
-	} catch {
-		ollamaInstalled = false;
+	if (!process.env.PI_NO_LOCAL_LLM) {
+		try {
+			execSync("which ollama", { stdio: "ignore" });
+			ollamaInstalled = true;
+		} catch {
+			ollamaInstalled = false;
+		}
 	}
 
 	describe.skipIf(!ollamaInstalled)("Ollama (local)", () => {
@@ -340,7 +468,7 @@ describe("Context overflow error handling", () => {
 				console.log("Pulling gpt-oss:20b model for Ollama overflow tests...");
 				try {
 					execSync("ollama pull gpt-oss:20b", { stdio: "inherit" });
-				} catch (e) {
+				} catch (_e) {
 					console.warn("Failed to pull gpt-oss:20b model, tests will be skipped");
 					return;
 				}
@@ -409,15 +537,17 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
-	// LM Studio (local) - Skip if not running
+	// LM Studio (local) - Skip if not running or local LLM tests disabled
 	// =============================================================================
 
 	let lmStudioRunning = false;
-	try {
-		execSync("curl -s --max-time 1 http://localhost:1234/v1/models > /dev/null", { stdio: "ignore" });
-		lmStudioRunning = true;
-	} catch {
-		lmStudioRunning = false;
+	if (!process.env.PI_NO_LOCAL_LLM) {
+		try {
+			execSync("curl -s --max-time 1 http://localhost:1234/v1/models > /dev/null", { stdio: "ignore" });
+			lmStudioRunning = true;
+		} catch {
+			lmStudioRunning = false;
+		}
 	}
 
 	describe.skipIf(!lmStudioRunning)("LM Studio (local)", () => {

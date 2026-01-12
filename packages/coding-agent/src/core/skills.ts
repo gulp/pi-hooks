@@ -1,7 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
+import { minimatch } from "minimatch";
 import { homedir } from "os";
 import { basename, dirname, join, resolve } from "path";
-import { CONFIG_DIR_NAME } from "../config.js";
+import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import type { SkillsSettings } from "./settings-manager.js";
 
 /**
  * Standard frontmatter fields per Agent Skills spec.
@@ -180,19 +182,34 @@ function loadSkillsFromDirInternal(dir: string, source: string, format: SkillFor
 				continue;
 			}
 
-			if (entry.isSymbolicLink()) {
+			// Skip node_modules to avoid scanning dependencies
+			if (entry.name === "node_modules") {
 				continue;
 			}
 
 			const fullPath = join(dir, entry.name);
 
+			// For symlinks, check if they point to a directory and follow them
+			let isDirectory = entry.isDirectory();
+			let isFile = entry.isFile();
+			if (entry.isSymbolicLink()) {
+				try {
+					const stats = statSync(fullPath);
+					isDirectory = stats.isDirectory();
+					isFile = stats.isFile();
+				} catch {
+					// Broken symlink, skip it
+					continue;
+				}
+			}
+
 			if (format === "recursive") {
 				// Recursive format: scan directories, look for SKILL.md files
-				if (entry.isDirectory()) {
+				if (isDirectory) {
 					const subResult = loadSkillsFromDirInternal(fullPath, source, format);
 					skills.push(...subResult.skills);
 					warnings.push(...subResult.warnings);
-				} else if (entry.isFile() && entry.name === "SKILL.md") {
+				} else if (isFile && entry.name === "SKILL.md") {
 					const result = loadSkillFromFile(fullPath, source);
 					if (result.skill) {
 						skills.push(result.skill);
@@ -201,7 +218,7 @@ function loadSkillsFromDirInternal(dir: string, source: string, format: SkillFor
 				}
 			} else if (format === "claude") {
 				// Claude format: only one level deep, each directory must contain SKILL.md
-				if (!entry.isDirectory()) {
+				if (!isDirectory) {
 					continue;
 				}
 
@@ -311,18 +328,76 @@ function escapeXml(str: string): string {
 		.replace(/'/g, "&apos;");
 }
 
+export interface LoadSkillsOptions extends SkillsSettings {
+	/** Working directory for project-local skills. Default: process.cwd() */
+	cwd?: string;
+	/** Agent config directory for global skills. Default: ~/.pi/agent */
+	agentDir?: string;
+}
+
 /**
  * Load skills from all configured locations.
  * Returns skills and any validation warnings.
  */
-export function loadSkills(): LoadSkillsResult {
+export function loadSkills(options: LoadSkillsOptions = {}): LoadSkillsResult {
+	const {
+		cwd = process.cwd(),
+		agentDir,
+		enableCodexUser = true,
+		enableClaudeUser = true,
+		enableClaudeProject = true,
+		enablePiUser = true,
+		enablePiProject = true,
+		customDirectories = [],
+		ignoredSkills = [],
+		includeSkills = [],
+	} = options;
+
+	// Resolve agentDir - if not provided, use default from config
+	const resolvedAgentDir = agentDir ?? getAgentDir();
+
 	const skillMap = new Map<string, Skill>();
+	const realPathSet = new Set<string>();
 	const allWarnings: SkillWarning[] = [];
 	const collisionWarnings: SkillWarning[] = [];
+
+	// Check if skill name matches any of the include patterns
+	function matchesIncludePatterns(name: string): boolean {
+		if (includeSkills.length === 0) return true; // No filter = include all
+		return includeSkills.some((pattern) => minimatch(name, pattern));
+	}
+
+	// Check if skill name matches any of the ignore patterns
+	function matchesIgnorePatterns(name: string): boolean {
+		if (ignoredSkills.length === 0) return false;
+		return ignoredSkills.some((pattern) => minimatch(name, pattern));
+	}
 
 	function addSkills(result: LoadSkillsResult) {
 		allWarnings.push(...result.warnings);
 		for (const skill of result.skills) {
+			// Apply ignore filter (glob patterns) - takes precedence over include
+			if (matchesIgnorePatterns(skill.name)) {
+				continue;
+			}
+			// Apply include filter (glob patterns)
+			if (!matchesIncludePatterns(skill.name)) {
+				continue;
+			}
+
+			// Resolve symlinks to detect duplicate files
+			let realPath: string;
+			try {
+				realPath = realpathSync(skill.filePath);
+			} catch {
+				realPath = skill.filePath;
+			}
+
+			// Skip silently if we've already loaded this exact file (via symlink)
+			if (realPathSet.has(realPath)) {
+				continue;
+			}
+
 			const existing = skillMap.get(skill.name);
 			if (existing) {
 				collisionWarnings.push({
@@ -331,27 +406,29 @@ export function loadSkills(): LoadSkillsResult {
 				});
 			} else {
 				skillMap.set(skill.name, skill);
+				realPathSet.add(realPath);
 			}
 		}
 	}
 
-	// Codex: recursive
-	const codexUserDir = join(homedir(), ".codex", "skills");
-	addSkills(loadSkillsFromDirInternal(codexUserDir, "codex-user", "recursive"));
-
-	// Claude: single level only
-	const claudeUserDir = join(homedir(), ".claude", "skills");
-	addSkills(loadSkillsFromDirInternal(claudeUserDir, "claude-user", "claude"));
-
-	const claudeProjectDir = resolve(process.cwd(), ".claude", "skills");
-	addSkills(loadSkillsFromDirInternal(claudeProjectDir, "claude-project", "claude"));
-
-	// Pi: recursive
-	const globalSkillsDir = join(homedir(), CONFIG_DIR_NAME, "agent", "skills");
-	addSkills(loadSkillsFromDirInternal(globalSkillsDir, "user", "recursive"));
-
-	const projectSkillsDir = resolve(process.cwd(), CONFIG_DIR_NAME, "skills");
-	addSkills(loadSkillsFromDirInternal(projectSkillsDir, "project", "recursive"));
+	if (enableCodexUser) {
+		addSkills(loadSkillsFromDirInternal(join(homedir(), ".codex", "skills"), "codex-user", "recursive"));
+	}
+	if (enableClaudeUser) {
+		addSkills(loadSkillsFromDirInternal(join(homedir(), ".claude", "skills"), "claude-user", "claude"));
+	}
+	if (enableClaudeProject) {
+		addSkills(loadSkillsFromDirInternal(resolve(cwd, ".claude", "skills"), "claude-project", "claude"));
+	}
+	if (enablePiUser) {
+		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", "recursive"));
+	}
+	if (enablePiProject) {
+		addSkills(loadSkillsFromDirInternal(resolve(cwd, CONFIG_DIR_NAME, "skills"), "project", "recursive"));
+	}
+	for (const customDir of customDirectories) {
+		addSkills(loadSkillsFromDirInternal(customDir.replace(/^~(?=$|[\\/])/, homedir()), "custom", "recursive"));
+	}
 
 	return {
 		skills: Array.from(skillMap.values()),

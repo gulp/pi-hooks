@@ -1,6 +1,8 @@
 import type { AnthropicOptions } from "./providers/anthropic.js";
 import type { GoogleOptions } from "./providers/google.js";
-import type { GoogleCloudCodeAssistOptions } from "./providers/google-cloud-code-assist.js";
+import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli.js";
+import type { GoogleVertexOptions } from "./providers/google-vertex.js";
+import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses.js";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions.js";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
@@ -10,16 +12,20 @@ export type { AssistantMessageEventStream } from "./utils/event-stream.js";
 export type Api =
 	| "openai-completions"
 	| "openai-responses"
+	| "openai-codex-responses"
 	| "anthropic-messages"
 	| "google-generative-ai"
-	| "google-cloud-code-assist";
+	| "google-gemini-cli"
+	| "google-vertex";
 
 export interface ApiOptionsMap {
 	"anthropic-messages": AnthropicOptions;
 	"openai-completions": OpenAICompletionsOptions;
 	"openai-responses": OpenAIResponsesOptions;
+	"openai-codex-responses": OpenAICodexResponsesOptions;
 	"google-generative-ai": GoogleOptions;
-	"google-cloud-code-assist": GoogleCloudCodeAssistOptions;
+	"google-gemini-cli": GoogleGeminiCliOptions;
+	"google-vertex": GoogleVertexOptions;
 }
 
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
@@ -36,17 +42,30 @@ export type OptionsForApi<TApi extends Api> = ApiOptionsMap[TApi];
 export type KnownProvider =
 	| "anthropic"
 	| "google"
+	| "google-gemini-cli"
+	| "google-antigravity"
+	| "google-vertex"
 	| "openai"
+	| "openai-codex"
 	| "github-copilot"
 	| "xai"
 	| "groq"
 	| "cerebras"
 	| "openrouter"
 	| "zai"
-	| "mistral";
+	| "mistral"
+	| "opencode";
 export type Provider = KnownProvider | string;
 
-export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+/** Token budgets for each thinking level (token-based providers only) */
+export interface ThinkingBudgets {
+	minimal?: number;
+	low?: number;
+	medium?: number;
+	high?: number;
+}
 
 // Base options all providers share
 export interface StreamOptions {
@@ -54,11 +73,19 @@ export interface StreamOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
+	/**
+	 * Optional session identifier for providers that support session-based caching.
+	 * Providers can use this to enable prompt caching, request routing, or other
+	 * session-aware features. Ignored by providers that don't support it.
+	 */
+	sessionId?: string;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
-	reasoning?: ReasoningEffort;
+	reasoning?: ThinkingLevel;
+	/** Custom token budgets for thinking levels (token-based providers only) */
+	thinkingBudgets?: ThinkingBudgets;
 }
 
 // Generic StreamFunction with typed options
@@ -180,6 +207,8 @@ export interface OpenAICompat {
 	supportsDeveloperRole?: boolean;
 	/** Whether the provider supports `reasoning_effort`. Default: auto-detected from URL. */
 	supportsReasoningEffort?: boolean;
+	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
+	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
 	maxTokensField?: "max_completion_tokens" | "max_tokens";
 	/** Whether tool results require the `name` field. Default: auto-detected from URL. */

@@ -1,4 +1,4 @@
-import type { AgentTool } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { Executor } from "../sandbox.js";
 import type { TransportContext } from "../transport/types.js";
 import { createAttachTool, type UploadFunction } from "./attach.js";

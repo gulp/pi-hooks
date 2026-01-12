@@ -12,6 +12,7 @@ import {
 } from "../../../core/tools/truncate.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
+import { truncateToVisualLines } from "./visual-truncate.js";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
@@ -20,7 +21,7 @@ export class BashExecutionComponent extends Container {
 	private command: string;
 	private outputLines: string[] = [];
 	private status: "running" | "complete" | "cancelled" | "error" = "running";
-	private exitCode: number | null = null;
+	private exitCode: number | undefined = undefined;
 	private loader: Loader;
 	private truncationResult?: TruncationResult;
 	private fullOutputPath?: string;
@@ -28,12 +29,14 @@ export class BashExecutionComponent extends Container {
 	private contentContainer: Container;
 	private ui: TUI;
 
-	constructor(command: string, ui: TUI) {
+	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		super();
 		this.command = command;
 		this.ui = ui;
 
-		const borderColor = (str: string) => theme.fg("bashMode", str);
+		// Use dim border for excluded-from-context commands (!! prefix)
+		const colorKey = excludeFromContext ? "dim" : "bashMode";
+		const borderColor = (str: string) => theme.fg(colorKey, str);
 
 		// Add spacer
 		this.addChild(new Spacer(1));
@@ -46,13 +49,13 @@ export class BashExecutionComponent extends Container {
 		this.addChild(this.contentContainer);
 
 		// Command header
-		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${command}`)), 1, 0);
+		const header = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
 		this.contentContainer.addChild(header);
 
 		// Loader
 		this.loader = new Loader(
 			ui,
-			(spinner) => theme.fg("bashMode", spinner),
+			(spinner) => theme.fg(colorKey, spinner),
 			(text) => theme.fg("muted", text),
 			"Running... (esc to cancel)",
 		);
@@ -67,6 +70,11 @@ export class BashExecutionComponent extends Container {
 	 */
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+		this.updateDisplay();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
 		this.updateDisplay();
 	}
 
@@ -89,13 +97,17 @@ export class BashExecutionComponent extends Container {
 	}
 
 	setComplete(
-		exitCode: number | null,
+		exitCode: number | undefined,
 		cancelled: boolean,
 		truncationResult?: TruncationResult,
 		fullOutputPath?: string,
 	): void {
 		this.exitCode = exitCode;
-		this.status = cancelled ? "cancelled" : exitCode !== 0 && exitCode !== null ? "error" : "complete";
+		this.status = cancelled
+			? "cancelled"
+			: exitCode !== 0 && exitCode !== undefined && exitCode !== null
+				? "error"
+				: "complete";
 		this.truncationResult = truncationResult;
 		this.fullOutputPath = fullOutputPath;
 
@@ -132,17 +144,17 @@ export class BashExecutionComponent extends Container {
 			if (this.expanded) {
 				// Show all lines
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
-				this.contentContainer.addChild(new Text("\n" + displayText, 1, 0));
+				this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
 			} else {
-				// Render preview lines, then cap at PREVIEW_LINES visual lines
-				const tempText = new Text(
-					"\n" + previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n"),
-					1,
-					0,
+				// Use shared visual truncation utility
+				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
+				const { visualLines } = truncateToVisualLines(
+					`\n${styledOutput}`,
+					PREVIEW_LINES,
+					this.ui.terminal.columns,
+					1, // padding
 				);
-				const visualLines = tempText.render(this.ui.terminal.columns);
-				const truncatedVisualLines = visualLines.slice(-PREVIEW_LINES);
-				this.contentContainer.addChild({ render: () => truncatedVisualLines, invalidate: () => {} });
+				this.contentContainer.addChild({ render: () => visualLines, invalidate: () => {} });
 			}
 		}
 
@@ -154,7 +166,11 @@ export class BashExecutionComponent extends Container {
 
 			// Show how many lines are hidden (collapsed preview)
 			if (hiddenLineCount > 0) {
-				statusParts.push(theme.fg("dim", `... ${hiddenLineCount} more lines (ctrl+o to expand)`));
+				if (this.expanded) {
+					statusParts.push(theme.fg("dim", "(ctrl+o to collapse)"));
+				} else {
+					statusParts.push(theme.fg("dim", `... ${hiddenLineCount} more lines (ctrl+o to expand)`));
+				}
 			}
 
 			if (this.status === "cancelled") {
@@ -170,7 +186,7 @@ export class BashExecutionComponent extends Container {
 			}
 
 			if (statusParts.length > 0) {
-				this.contentContainer.addChild(new Text("\n" + statusParts.join("\n"), 1, 0));
+				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 1, 0));
 			}
 		}
 	}

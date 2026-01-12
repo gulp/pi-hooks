@@ -11,6 +11,7 @@ import type {
 	ResponseReasoningItem,
 } from "openai/resources/responses/responses.js";
 import { calculateCost } from "../models.js";
+import { getEnvApiKey } from "../stream.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -27,8 +28,21 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-
 import { transformMessages } from "./transorm-messages.js";
+
+/** Fast deterministic hash to shorten long strings */
+function shortHash(str: string): string {
+	let h1 = 0xdeadbeef;
+	let h2 = 0x41c6ce57;
+	for (let i = 0; i < str.length; i++) {
+		const ch = str.charCodeAt(i);
+		h1 = Math.imul(h1 ^ ch, 2654435761);
+		h2 = Math.imul(h2 ^ ch, 1597334677);
+	}
+	h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+	h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+	return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+}
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
@@ -68,7 +82,8 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 
 		try {
 			// Create OpenAI client
-			const client = createClient(model, context, options?.apiKey);
+			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			const client = createClient(model, context, apiKey);
 			const params = buildParams(model, context, options);
 			const openaiStream = await client.responses.create(params, { signal: options?.signal });
 			stream.push({ type: "start", partial: output });
@@ -96,7 +111,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 						currentItem = item;
 						currentBlock = {
 							type: "toolCall",
-							id: item.call_id + "|" + item.id,
+							id: `${item.call_id}|${item.id}`,
 							name: item.name,
 							arguments: {},
 							partialJson: item.arguments || "",
@@ -237,7 +252,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 					} else if (item.type === "function_call") {
 						const toolCall: ToolCall = {
 							type: "toolCall",
-							id: item.call_id + "|" + item.id,
+							id: `${item.call_id}|${item.id}`,
 							name: item.name,
 							arguments: JSON.parse(item.arguments),
 						};
@@ -401,6 +416,7 @@ function convertMessages(model: Model<"openai-responses">, context: Context): Re
 		});
 	}
 
+	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
@@ -444,12 +460,19 @@ function convertMessages(model: Model<"openai-responses">, context: Context): Re
 					}
 				} else if (block.type === "text") {
 					const textBlock = block as TextContent;
+					// OpenAI requires id to be max 64 characters
+					let msgId = textBlock.textSignature;
+					if (!msgId) {
+						msgId = `msg_${msgIndex}`;
+					} else if (msgId.length > 64) {
+						msgId = `msg_${shortHash(msgId)}`;
+					}
 					output.push({
 						type: "message",
 						role: "assistant",
 						content: [{ type: "output_text", text: sanitizeSurrogates(textBlock.text), annotations: [] }],
 						status: "completed",
-						id: textBlock.textSignature || "msg_" + Math.random().toString(36).substring(2, 15),
+						id: msgId,
 					} satisfies ResponseOutputMessage);
 					// Do not submit toolcall blocks if the completion had an error (i.e. abort)
 				} else if (block.type === "toolCall" && msg.stopReason !== "error") {
@@ -508,6 +531,7 @@ function convertMessages(model: Model<"openai-responses">, context: Context): Re
 				});
 			}
 		}
+		msgIndex++;
 	}
 
 	return messages;
@@ -519,7 +543,7 @@ function convertTools(tools: Tool[]): OpenAITool[] {
 		name: tool.name,
 		description: tool.description,
 		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-		strict: null,
+		strict: false,
 	}));
 }
 

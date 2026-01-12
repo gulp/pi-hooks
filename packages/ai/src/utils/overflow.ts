@@ -16,6 +16,7 @@ import type { AssistantMessage } from "../types.js";
  * - OpenRouter: "This endpoint's maximum context length is X tokens. However, you requested about Y tokens"
  * - llama.cpp: "the request exceeds the available context size, try increasing it"
  * - LM Studio: "tokens to keep from the initial prompt is greater than the context length"
+ * - GitHub Copilot: "prompt token count of X exceeds the limit of Y"
  * - Cerebras: Returns "400 status code (no body)" - handled separately below
  * - Mistral: Returns "400 status code (no body)" - handled separately below
  * - z.ai: Does NOT error, accepts overflow silently - handled via usage.input > contextWindow
@@ -28,9 +29,10 @@ const OVERFLOW_PATTERNS = [
 	/maximum prompt length is \d+/i, // xAI (Grok)
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
+	/exceeds the limit of \d+/i, // GitHub Copilot
 	/exceeds the available context size/i, // llama.cpp server
 	/greater than the context length/i, // LM Studio
-	/context length exceeded/i, // Generic fallback
+	/context[_ ]length[_ ]exceeded/i, // Generic fallback
 	/too many tokens/i, // Generic fallback
 	/token limit exceeded/i, // Generic fallback
 ];
@@ -52,8 +54,8 @@ const OVERFLOW_PATTERNS = [
  * - Google Gemini: "input token count exceeds the maximum"
  * - xAI (Grok): "maximum prompt length is X but request contains Y"
  * - Groq: "reduce the length of the messages"
- * - Cerebras: 400/413 status code (no body)
- * - Mistral: 400/413 status code (no body)
+ * - Cerebras: 400/413/429 status code (no body)
+ * - Mistral: 400/413/429 status code (no body)
  * - OpenRouter (all backends): "maximum context length is X tokens"
  * - llama.cpp: "exceeds the available context size"
  * - LM Studio: "greater than the context length"
@@ -87,8 +89,9 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 			return true;
 		}
 
-		// Cerebras and Mistral return 400/413 with no body - check for status code pattern
-		if (/^4(00|13)\s*(status code)?\s*\(no body\)/i.test(message.errorMessage)) {
+		// Cerebras and Mistral return 400/413/429 with no body - check for status code pattern
+		// 429 can indicate token-based rate limiting which correlates with context overflow
+		if (/^4(00|13|29)\s*(status code)?\s*\(no body\)/i.test(message.errorMessage)) {
 			return true;
 		}
 	}

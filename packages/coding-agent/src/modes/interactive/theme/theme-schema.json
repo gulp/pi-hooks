@@ -47,6 +47,9 @@
 				"text",
 				"userMessageBg",
 				"userMessageText",
+				"customMessageBg",
+				"customMessageText",
+				"customMessageLabel",
 				"toolPendingBg",
 				"toolSuccessBg",
 				"toolErrorBg",
@@ -121,6 +124,18 @@
 				"userMessageText": {
 					"$ref": "#/$defs/colorValue",
 					"description": "User message text color"
+				},
+				"customMessageBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Custom message background (hook-injected messages)"
+				},
+				"customMessageText": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Custom message text color"
+				},
+				"customMessageLabel": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Custom message type label color"
 				},
 				"toolPendingBg": {
 					"$ref": "#/$defs/colorValue",
@@ -249,6 +264,25 @@
 				"bashMode": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in bash mode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"export": {
+			"type": "object",
+			"description": "Optional colors for HTML export (defaults derived from userMessageBg if not specified)",
+			"properties": {
+				"pageBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Page background color"
+				},
+				"cardBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Card/container background color"
+				},
+				"infoBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Info sections background (system prompt, notices)"
 				}
 			},
 			"additionalProperties": false

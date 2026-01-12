@@ -1,14 +1,15 @@
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { bashTool } from "../src/core/tools/bash.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { bashTool, createBashTool } from "../src/core/tools/bash.js";
 import { editTool } from "../src/core/tools/edit.js";
 import { findTool } from "../src/core/tools/find.js";
 import { grepTool } from "../src/core/tools/grep.js";
 import { lsTool } from "../src/core/tools/ls.js";
 import { readTool } from "../src/core/tools/read.js";
 import { writeTool } from "../src/core/tools/write.js";
+import * as shellModule from "../src/utils/shell.js";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -277,6 +278,27 @@ describe("Coding Agent Tools", () => {
 				/timed out/i,
 			);
 		});
+
+		it("should throw error when cwd does not exist", async () => {
+			const nonexistentCwd = "/this/directory/definitely/does/not/exist/12345";
+
+			const bashToolWithBadCwd = createBashTool(nonexistentCwd);
+
+			await expect(bashToolWithBadCwd.execute("test-call-11", { command: "echo test" })).rejects.toThrow(
+				/Working directory does not exist/,
+			);
+		});
+
+		it("should handle process spawn errors", async () => {
+			vi.spyOn(shellModule, "getShellConfig").mockReturnValueOnce({
+				shell: "/nonexistent-shell-path-xyz123",
+				args: ["-c"],
+			});
+
+			const bashWithBadShell = createBashTool(testDir);
+
+			await expect(bashWithBadShell.execute("test-call-12", { command: "echo test" })).rejects.toThrow(/ENOENT/);
+		});
 	});
 
 	describe("grep tool", () => {
@@ -363,5 +385,88 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(".hidden-file");
 			expect(output).toContain(".hidden-dir/");
 		});
+	});
+});
+
+describe("edit tool CRLF handling", () => {
+	let testDir: string;
+
+	beforeEach(() => {
+		testDir = join(tmpdir(), `coding-agent-crlf-test-${Date.now()}`);
+		mkdirSync(testDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	it("should match LF oldText against CRLF file content", async () => {
+		const testFile = join(testDir, "crlf-test.txt");
+
+		writeFileSync(testFile, "line one\r\nline two\r\nline three\r\n");
+
+		const result = await editTool.execute("test-crlf-1", {
+			path: testFile,
+			oldText: "line two\n",
+			newText: "replaced line\n",
+		});
+
+		expect(getTextOutput(result)).toContain("Successfully replaced");
+	});
+
+	it("should preserve CRLF line endings after edit", async () => {
+		const testFile = join(testDir, "crlf-preserve.txt");
+		writeFileSync(testFile, "first\r\nsecond\r\nthird\r\n");
+
+		await editTool.execute("test-crlf-2", {
+			path: testFile,
+			oldText: "second\n",
+			newText: "REPLACED\n",
+		});
+
+		const content = readFileSync(testFile, "utf-8");
+		expect(content).toBe("first\r\nREPLACED\r\nthird\r\n");
+	});
+
+	it("should preserve LF line endings for LF files", async () => {
+		const testFile = join(testDir, "lf-preserve.txt");
+		writeFileSync(testFile, "first\nsecond\nthird\n");
+
+		await editTool.execute("test-lf-1", {
+			path: testFile,
+			oldText: "second\n",
+			newText: "REPLACED\n",
+		});
+
+		const content = readFileSync(testFile, "utf-8");
+		expect(content).toBe("first\nREPLACED\nthird\n");
+	});
+
+	it("should detect duplicates across CRLF/LF variants", async () => {
+		const testFile = join(testDir, "mixed-endings.txt");
+
+		writeFileSync(testFile, "hello\r\nworld\r\n---\r\nhello\nworld\n");
+
+		await expect(
+			editTool.execute("test-crlf-dup", {
+				path: testFile,
+				oldText: "hello\nworld\n",
+				newText: "replaced\n",
+			}),
+		).rejects.toThrow(/Found 2 occurrences/);
+	});
+
+	it("should preserve UTF-8 BOM after edit", async () => {
+		const testFile = join(testDir, "bom-test.txt");
+		writeFileSync(testFile, "\uFEFFfirst\r\nsecond\r\nthird\r\n");
+
+		await editTool.execute("test-bom", {
+			path: testFile,
+			oldText: "second\n",
+			newText: "REPLACED\n",
+		});
+
+		const content = readFileSync(testFile, "utf-8");
+		expect(content).toBe("\uFEFFfirst\r\nREPLACED\r\nthird\r\n");
 	});
 });

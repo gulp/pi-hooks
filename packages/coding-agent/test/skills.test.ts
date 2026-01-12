@@ -1,6 +1,7 @@
+import { homedir } from "os";
 import { join, resolve } from "path";
 import { describe, expect, it } from "vitest";
-import { formatSkillsForPrompt, loadSkillsFromDir, type Skill } from "../src/core/skills.js";
+import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, type Skill } from "../src/core/skills.js";
 
 const fixturesDir = resolve(__dirname, "fixtures/skills");
 const collisionFixturesDir = resolve(__dirname, "fixtures/skills-collision");
@@ -105,7 +106,7 @@ describe("skills", () => {
 		});
 
 		it("should load all skills from fixture directory", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+			const { skills } = loadSkillsFromDir({
 				dir: fixturesDir,
 				source: "test",
 			});
@@ -227,6 +228,155 @@ describe("skills", () => {
 			expect(result).toContain("<name>skill-one</name>");
 			expect(result).toContain("<name>skill-two</name>");
 			expect((result.match(/<skill>/g) || []).length).toBe(2);
+		});
+	});
+
+	describe("loadSkills with options", () => {
+		it("should load from customDirectories only when built-ins disabled", () => {
+			const { skills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+			});
+			expect(skills.length).toBeGreaterThan(0);
+			expect(skills.every((s) => s.source === "custom")).toBe(true);
+		});
+
+		it("should filter out ignoredSkills", () => {
+			const { skills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [join(fixturesDir, "valid-skill")],
+				ignoredSkills: ["valid-skill"],
+			});
+			expect(skills).toHaveLength(0);
+		});
+
+		it("should support glob patterns in ignoredSkills", () => {
+			const { skills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+				ignoredSkills: ["valid-*"],
+			});
+			expect(skills.every((s) => !s.name.startsWith("valid-"))).toBe(true);
+		});
+
+		it("should have ignoredSkills take precedence over includeSkills", () => {
+			const { skills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+				includeSkills: ["valid-*"],
+				ignoredSkills: ["valid-skill"],
+			});
+			// valid-skill should be excluded even though it matches includeSkills
+			expect(skills.every((s) => s.name !== "valid-skill")).toBe(true);
+		});
+
+		it("should expand ~ in customDirectories", () => {
+			const homeSkillsDir = join(homedir(), ".pi/agent/skills");
+			const { skills: withTilde } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: ["~/.pi/agent/skills"],
+			});
+			const { skills: withoutTilde } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [homeSkillsDir],
+			});
+			expect(withTilde.length).toBe(withoutTilde.length);
+		});
+
+		it("should return empty when all sources disabled and no custom dirs", () => {
+			const { skills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+			});
+			expect(skills).toHaveLength(0);
+		});
+
+		it("should filter skills with includeSkills glob patterns", () => {
+			// Load all skills from fixtures
+			const { skills: allSkills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+			});
+			expect(allSkills.length).toBeGreaterThan(0);
+
+			// Filter to only include "valid-skill"
+			const { skills: filtered } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+				includeSkills: ["valid-skill"],
+			});
+			expect(filtered).toHaveLength(1);
+			expect(filtered[0].name).toBe("valid-skill");
+		});
+
+		it("should support glob patterns in includeSkills", () => {
+			const { skills } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+				includeSkills: ["valid-*"],
+			});
+			expect(skills.length).toBeGreaterThan(0);
+			expect(skills.every((s) => s.name.startsWith("valid-"))).toBe(true);
+		});
+
+		it("should return all skills when includeSkills is empty", () => {
+			const { skills: withEmpty } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+				includeSkills: [],
+			});
+			const { skills: withoutOption } = loadSkills({
+				enableCodexUser: false,
+				enableClaudeUser: false,
+				enableClaudeProject: false,
+				enablePiUser: false,
+				enablePiProject: false,
+				customDirectories: [fixturesDir],
+			});
+			expect(withEmpty.length).toBe(withoutOption.length);
 		});
 	});
 

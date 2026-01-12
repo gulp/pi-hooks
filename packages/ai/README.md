@@ -4,17 +4,61 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 
 **Note**: This library only includes models that support tool calling (function calling), as this is essential for agentic workflows.
 
+## Table of Contents
+
+- [Supported Providers](#supported-providers)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Tools](#tools)
+  - [Defining Tools](#defining-tools)
+  - [Handling Tool Calls](#handling-tool-calls)
+  - [Streaming Tool Calls with Partial JSON](#streaming-tool-calls-with-partial-json)
+  - [Validating Tool Arguments](#validating-tool-arguments)
+  - [Complete Event Reference](#complete-event-reference)
+- [Image Input](#image-input)
+- [Thinking/Reasoning](#thinkingreasoning)
+  - [Unified Interface](#unified-interface-streamsimplecompletesimple)
+  - [Provider-Specific Options](#provider-specific-options-streamcomplete)
+  - [Streaming Thinking Content](#streaming-thinking-content)
+- [Stop Reasons](#stop-reasons)
+- [Error Handling](#error-handling)
+  - [Aborting Requests](#aborting-requests)
+  - [Continuing After Abort](#continuing-after-abort)
+- [APIs, Models, and Providers](#apis-models-and-providers)
+  - [Providers and Models](#providers-and-models)
+  - [Querying Providers and Models](#querying-providers-and-models)
+  - [Custom Models](#custom-models)
+  - [OpenAI Compatibility Settings](#openai-compatibility-settings)
+  - [Type Safety](#type-safety)
+- [Cross-Provider Handoffs](#cross-provider-handoffs)
+- [Context Serialization](#context-serialization)
+- [Browser Usage](#browser-usage)
+  - [Environment Variables](#environment-variables-nodejs-only)
+  - [Checking Environment Variables](#checking-environment-variables)
+- [OAuth Providers](#oauth-providers)
+  - [Vertex AI (ADC)](#vertex-ai-adc)
+  - [CLI Login](#cli-login)
+  - [Programmatic OAuth](#programmatic-oauth)
+  - [Login Flow Example](#login-flow-example)
+  - [Using OAuth Tokens](#using-oauth-tokens)
+  - [Provider Notes](#provider-notes)
+- [License](#license)
+
 ## Supported Providers
 
 - **OpenAI**
+- **OpenAI Codex** (ChatGPT Plus/Pro subscription, requires OAuth, see below)
 - **Anthropic**
 - **Google**
+- **Vertex AI** (Gemini via Vertex AI)
 - **Mistral**
 - **Groq**
 - **Cerebras**
 - **xAI**
 - **OpenRouter**
 - **GitHub Copilot** (requires OAuth, see below)
+- **Google Gemini CLI** (requires OAuth, see below)
+- **Antigravity** (requires OAuth, see below)
 - **Any OpenAI-compatible API**: Ollama, vLLM, LM Studio, etc.
 
 ## Installation
@@ -782,274 +826,6 @@ const continuation = await complete(newModel, restored);
 
 > **Note**: If the context contains images (encoded as base64 as shown in the Image Input section), those will also be serialized.
 
-## Agent API
-
-The Agent API provides a higher-level interface for building agents with tools. It handles tool execution, validation, and provides detailed event streaming for interactive applications.
-
-### Event System
-
-The Agent API streams events during execution, allowing you to build reactive UIs and track agent progress. The agent processes prompts in **turns**, where each turn consists of:
-1. An assistant message (the LLM's response)
-2. Optional tool executions if the assistant calls tools
-3. Tool result messages that are fed back to the LLM
-
-This continues until the assistant produces a response without tool calls.
-
-### Event Flow Example
-
-Given a prompt asking to calculate two expressions and sum them:
-
-```typescript
-import { agentLoop, AgentContext, calculateTool } from '@mariozechner/pi-ai';
-
-const context: AgentContext = {
-  systemPrompt: 'You are a helpful math assistant.',
-  messages: [],
-  tools: [calculateTool]
-};
-
-const stream = agentLoop(
-  { role: 'user', content: 'Calculate 15 * 20 and 30 * 40, then sum the results', timestamp: Date.now() },
-  context,
-  { model: getModel('openai', 'gpt-4o-mini') }
-);
-
-// Expected event sequence:
-// 1. agent_start          - Agent begins processing
-// 2. turn_start           - First turn begins
-// 3. message_start        - User message starts
-// 4. message_end          - User message ends
-// 5. message_start        - Assistant message starts
-// 6. message_update       - Assistant streams response with tool calls
-// 7. message_end          - Assistant message ends
-// 8. tool_execution_start  - First calculation (15 * 20)
-// 9. tool_execution_update - Streaming progress (for long-running tools)
-// 10. tool_execution_end   - Result: 300
-// 11. tool_execution_start - Second calculation (30 * 40)
-// 12. tool_execution_update - Streaming progress
-// 13. tool_execution_end   - Result: 1200
-// 12. message_start       - Tool result message for first calculation
-// 13. message_end         - Tool result message ends
-// 14. message_start       - Tool result message for second calculation
-// 15. message_end         - Tool result message ends
-// 16. turn_end            - First turn ends with 2 tool results
-// 17. turn_start          - Second turn begins
-// 18. message_start       - Assistant message starts
-// 19. message_update      - Assistant streams response with sum calculation
-// 20. message_end         - Assistant message ends
-// 21. tool_execution_start - Sum calculation (300 + 1200)
-// 22. tool_execution_end   - Result: 1500
-// 23. message_start       - Tool result message for sum
-// 24. message_end         - Tool result message ends
-// 25. turn_end            - Second turn ends with 1 tool result
-// 26. turn_start          - Third turn begins
-// 27. message_start       - Final assistant message starts
-// 28. message_update      - Assistant streams final answer
-// 29. message_end         - Final assistant message ends
-// 30. turn_end            - Third turn ends with 0 tool results
-// 31. agent_end           - Agent completes with all messages
-```
-
-### Handling Events
-
-```typescript
-for await (const event of stream) {
-  switch (event.type) {
-    case 'agent_start':
-      console.log('Agent started');
-      break;
-
-    case 'turn_start':
-      console.log('New turn started');
-      break;
-
-    case 'message_start':
-      console.log(`${event.message.role} message started`);
-      break;
-
-    case 'message_update':
-      // Only for assistant messages during streaming
-      if (event.message.content.some(c => c.type === 'text')) {
-        console.log('Assistant:', event.message.content);
-      }
-      break;
-
-    case 'tool_execution_start':
-      console.log(`Calling ${event.toolName} with:`, event.args);
-      break;
-
-    case 'tool_execution_update':
-      // Streaming progress for long-running tools (e.g., bash output)
-      console.log(`Progress:`, event.partialResult.content);
-      break;
-
-    case 'tool_execution_end':
-      if (event.isError) {
-        console.error(`Tool failed:`, event.result);
-      } else {
-        console.log(`Tool result:`, event.result.content);
-      }
-      break;
-
-    case 'turn_end':
-      console.log(`Turn ended with ${event.toolResults.length} tool calls`);
-      break;
-
-    case 'agent_end':
-      console.log(`Agent completed with ${event.messages.length} new messages`);
-      break;
-  }
-}
-
-// Get all messages generated during this agent execution
-// These include the user message and can be directly appended to context.messages
-const messages = await stream.result();
-context.messages.push(...messages);
-```
-
-### Continuing from Existing Context
-
-Use `agentLoopContinue` to resume an agent loop without adding a new user message. This is useful for:
-- Retrying after context overflow (after compaction reduces context size)
-- Resuming from tool results that were added manually to the context
-
-```typescript
-import { agentLoopContinue, AgentContext } from '@mariozechner/pi-ai';
-
-// Context already has messages - last must be 'user' or 'toolResult'
-const context: AgentContext = {
-  systemPrompt: 'You are helpful.',
-  messages: [userMessage, assistantMessage, toolResult],
-  tools: [myTool]
-};
-
-// Continue processing from the tool result
-const stream = agentLoopContinue(context, { model });
-
-for await (const event of stream) {
-  // Same events as agentLoop, but no user message events emitted
-}
-
-const newMessages = await stream.result();
-```
-
-**Validation**: Throws if context has no messages or if the last message is an assistant message.
-
-### Defining Tools with TypeBox
-
-Tools use TypeBox schemas for runtime validation and type inference:
-
-```typescript
-import { Type, Static, AgentTool, AgentToolResult, StringEnum } from '@mariozechner/pi-ai';
-
-const weatherSchema = Type.Object({
-  city: Type.String({ minLength: 1 }),
-  units: StringEnum(['celsius', 'fahrenheit'], { default: 'celsius' })
-});
-
-type WeatherParams = Static<typeof weatherSchema>;
-
-const weatherTool: AgentTool<typeof weatherSchema, { temp: number }> = {
-  label: 'Get Weather',
-  name: 'get_weather',
-  description: 'Get current weather for a city',
-  parameters: weatherSchema,
-  execute: async (toolCallId, args, signal, onUpdate) => {
-    // args is fully typed: { city: string, units: 'celsius' | 'fahrenheit' }
-    // signal: AbortSignal for cancellation
-    // onUpdate: Optional callback for streaming progress (emits tool_execution_update events)
-    const temp = Math.round(Math.random() * 30);
-    return {
-      content: [{ type: 'text', text: `Temperature in ${args.city}: ${temp}°${args.units[0].toUpperCase()}` }],
-      details: { temp }
-    };
-  }
-};
-
-// Tools can also return images alongside text
-const chartTool: AgentTool<typeof Type.Object({ data: Type.Array(Type.Number()) })> = {
-  label: 'Generate Chart',
-  name: 'generate_chart',
-  description: 'Generate a chart from data',
-  parameters: Type.Object({ data: Type.Array(Type.Number()) }),
-  execute: async (toolCallId, args) => {
-    const chartImage = await generateChartImage(args.data);
-    return {
-      content: [
-        { type: 'text', text: `Generated chart with ${args.data.length} data points` },
-        { type: 'image', data: chartImage.toString('base64'), mimeType: 'image/png' }
-      ]
-    };
-  }
-};
-
-// Tools can stream progress via the onUpdate callback (emits tool_execution_update events)
-const bashTool: AgentTool<typeof Type.Object({ command: Type.String() }), { exitCode: number }> = {
-  label: 'Run Bash',
-  name: 'bash',
-  description: 'Execute a bash command',
-  parameters: Type.Object({ command: Type.String() }),
-  execute: async (toolCallId, args, signal, onUpdate) => {
-    let output = '';
-    const child = spawn('bash', ['-c', args.command]);
-
-    child.stdout.on('data', (data) => {
-      output += data.toString();
-      // Stream partial output to UI via tool_execution_update events
-      onUpdate?.({
-        content: [{ type: 'text', text: output }],
-        details: { exitCode: -1 }  // Not finished yet
-      });
-    });
-
-    const exitCode = await new Promise<number>((resolve) => {
-      child.on('close', resolve);
-    });
-
-    return {
-      content: [{ type: 'text', text: output }],
-      details: { exitCode }
-    };
-  }
-};
-```
-
-### Validation and Error Handling
-
-Tool arguments are automatically validated using AJV with the TypeBox schema. Invalid arguments result in detailed error messages:
-
-```typescript
-// If the LLM calls with invalid arguments:
-// get_weather({ city: '', units: 'kelvin' })
-
-// The tool execution will fail with:
-/*
-Validation failed for tool "get_weather":
-  - city: must NOT have fewer than 1 characters
-  - units: must be equal to one of the allowed values
-
-Received arguments:
-{
-  "city": "",
-  "units": "kelvin"
-}
-*/
-```
-
-### Built-in Example Tools
-
-The library includes example tools for common operations:
-
-```typescript
-import { calculateTool, getCurrentTimeTool } from '@mariozechner/pi-ai';
-
-const context: AgentContext = {
-  systemPrompt: 'You are a helpful assistant.',
-  messages: [],
-  tools: [calculateTool, getCurrentTimeTool]
-};
-```
-
 ## Browser Usage
 
 The library supports browser environments. You must pass the API key explicitly since environment variables are not available in browsers:
@@ -1073,17 +849,19 @@ const response = await complete(model, {
 
 In Node.js environments, you can set environment variables to avoid passing API keys:
 
-```bash
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-GEMINI_API_KEY=...
-MISTRAL_API_KEY=...
-GROQ_API_KEY=gsk_...
-CEREBRAS_API_KEY=csk-...
-XAI_API_KEY=xai-...
-ZAI_API_KEY=...
-OPENROUTER_API_KEY=sk-or-...
-```
+| Provider | Environment Variable(s) |
+|----------|------------------------|
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` |
+| Google | `GEMINI_API_KEY` |
+| Vertex AI | `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` + ADC |
+| Mistral | `MISTRAL_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| Cerebras | `CEREBRAS_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| zAI | `ZAI_API_KEY` |
+| GitHub Copilot | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN` |
 
 When set, the library automatically uses these keys:
 
@@ -1098,44 +876,155 @@ const response = await complete(model, context, {
 });
 ```
 
-### Programmatic API Key Management
-
-You can also set and get API keys programmatically:
+### Checking Environment Variables
 
 ```typescript
-import { setApiKey, getApiKey } from '@mariozechner/pi-ai';
+import { getEnvApiKey } from '@mariozechner/pi-ai';
 
-// Set API key for a provider
-setApiKey('openai', 'sk-...');
-setApiKey('anthropic', 'sk-ant-...');
-
-// Get API key for a provider (checks both programmatic and env vars)
-const key = getApiKey('openai');
+// Check if an API key is set in environment variables
+const key = getEnvApiKey('openai');  // checks OPENAI_API_KEY
 ```
 
-## GitHub Copilot
+## OAuth Providers
 
-GitHub Copilot is available as a provider, requiring OAuth authentication via GitHub's device flow.
+Several providers require OAuth authentication instead of static API keys:
 
-**Using with `@mariozechner/pi-coding-agent`**: Use `/login` and select "GitHub Copilot" to authenticate. All models are automatically enabled after login. Token stored in `~/.pi/agent/oauth.json`.
+- **Anthropic** (Claude Pro/Max subscription)
+- **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
+- **GitHub Copilot** (Copilot subscription)
+- **Google Gemini CLI** (Gemini 2.0/2.5 via Google Cloud Code Assist; free tier or paid subscription)
+- **Antigravity** (Free Gemini 3, Claude, GPT-OSS via Google Cloud)
 
-**Using standalone**: If you have a valid Copilot OAuth token (e.g., from the coding agent's `oauth.json`):
+For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
+
+### Vertex AI (ADC)
+
+Vertex AI models use Application Default Credentials (ADC):
+
+- **Local development**: Run `gcloud auth application-default login`
+- **CI/Production**: Set `GOOGLE_APPLICATION_CREDENTIALS` to point to a service account JSON key file
+
+Also set `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION`. You can also pass `project`/`location` in the call options.
+
+Example:
+
+```bash
+# Local (uses your user credentials)
+gcloud auth application-default login
+export GOOGLE_CLOUD_PROJECT="my-project"
+export GOOGLE_CLOUD_LOCATION="us-central1"
+
+# CI/Production (service account key file)
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
 
 ```typescript
 import { getModel, complete } from '@mariozechner/pi-ai';
 
-const model = getModel('github-copilot', 'gpt-4o');
+(async () => {
+  const model = getModel('google-vertex', 'gemini-2.5-flash');
+  const response = await complete(model, {
+    messages: [{ role: 'user', content: 'Hello from Vertex AI' }]
+  });
 
-const response = await complete(model, {
-  messages: [{ role: 'user', content: 'Hello!' }]
-}, {
-  apiKey: 'tid=...;exp=...;proxy-ep=...'  // OAuth token from ~/.pi/agent/oauth.json
-});
+  for (const block of response.content) {
+    if (block.type === 'text') console.log(block.text);
+  }
+})().catch(console.error);
 ```
 
-**Note**: OAuth tokens expire and need periodic refresh. The coding agent handles this automatically.
+Official docs: [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
 
-If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
+### CLI Login
+
+The quickest way to authenticate:
+
+```bash
+npx @mariozechner/pi-ai login              # interactive provider selection
+npx @mariozechner/pi-ai login anthropic    # login to specific provider
+npx @mariozechner/pi-ai list               # list available providers
+```
+
+Credentials are saved to `auth.json` in the current directory.
+
+### Programmatic OAuth
+
+The library provides login and token refresh functions. Credential storage is the caller's responsibility.
+
+```typescript
+import {
+  // Login functions (return credentials, do not store)
+  loginAnthropic,
+  loginOpenAICodex,
+  loginGitHubCopilot,
+  loginGeminiCli,
+  loginAntigravity,
+
+  // Token management
+  refreshOAuthToken,   // (provider, credentials) => new credentials
+  getOAuthApiKey,      // (provider, credentialsMap) => { newCredentials, apiKey } | null
+
+  // Types
+  type OAuthProvider,  // 'anthropic' | 'openai-codex' | 'github-copilot' | 'google-gemini-cli' | 'google-antigravity'
+  type OAuthCredentials,
+} from '@mariozechner/pi-ai';
+```
+
+### Login Flow Example
+
+```typescript
+import { loginGitHubCopilot } from '@mariozechner/pi-ai';
+import { writeFileSync } from 'fs';
+
+const credentials = await loginGitHubCopilot({
+  onAuth: (url, instructions) => {
+    console.log(`Open: ${url}`);
+    if (instructions) console.log(instructions);
+  },
+  onPrompt: async (prompt) => {
+    return await getUserInput(prompt.message);
+  },
+  onProgress: (message) => console.log(message)
+});
+
+// Store credentials yourself
+const auth = { 'github-copilot': { type: 'oauth', ...credentials } };
+writeFileSync('auth.json', JSON.stringify(auth, null, 2));
+```
+
+### Using OAuth Tokens
+
+Use `getOAuthApiKey()` to get an API key, automatically refreshing if expired:
+
+```typescript
+import { getModel, complete, getOAuthApiKey } from '@mariozechner/pi-ai';
+import { readFileSync, writeFileSync } from 'fs';
+
+// Load your stored credentials
+const auth = JSON.parse(readFileSync('auth.json', 'utf-8'));
+
+// Get API key (refreshes if expired)
+const result = await getOAuthApiKey('github-copilot', auth);
+if (!result) throw new Error('Not logged in');
+
+// Save refreshed credentials
+auth['github-copilot'] = { type: 'oauth', ...result.newCredentials };
+writeFileSync('auth.json', JSON.stringify(auth, null, 2));
+
+// Use the API key
+const model = getModel('github-copilot', 'gpt-4o');
+const response = await complete(model, {
+  messages: [{ role: 'user', content: 'Hello!' }]
+}, { apiKey: result.apiKey });
+```
+
+### Provider Notes
+
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options.
+
+**GitHub Copilot**: If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
+
+**Google Gemini CLI / Antigravity**: These use Google Cloud OAuth. The `apiKey` returned by `getOAuthApiKey()` is a JSON string containing both the token and project ID, which the library handles automatically.
 
 ## License
 

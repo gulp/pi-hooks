@@ -1,3 +1,5 @@
+> pi can create skills. Ask it to build one for your use case.
+
 # Skills
 
 Skills are self-contained capability packages that the agent loads on-demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
@@ -35,7 +37,7 @@ Skills are loaded when:
 
 **Not a good fit for skills:**
 - "Always use TypeScript strict mode" → put in AGENTS.md
-- "Review my code" → make a slash command
+- "Review my code" → make a prompt template
 - Need user confirmation dialogs or custom TUI rendering → make a custom tool
 
 ## Skill Structure
@@ -145,6 +147,59 @@ Skills are discovered from these locations (later wins on name collision):
 4. `~/.pi/agent/skills/**/SKILL.md` (Pi user, recursive)
 5. `<cwd>/.pi/skills/**/SKILL.md` (Pi project, recursive)
 
+## Configuration
+
+Configure skill loading in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "skills": {
+    "enabled": true,
+    "enableCodexUser": true,
+    "enableClaudeUser": true,
+    "enableClaudeProject": true,
+    "enablePiUser": true,
+    "enablePiProject": true,
+    "enableSkillCommands": true,
+    "customDirectories": ["~/my-skills-repo"],
+    "ignoredSkills": ["deprecated-skill"],
+    "includeSkills": ["git-*", "docker"]
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Master toggle for all skills |
+| `enableCodexUser` | `true` | Load from `~/.codex/skills/` |
+| `enableClaudeUser` | `true` | Load from `~/.claude/skills/` |
+| `enableClaudeProject` | `true` | Load from `<cwd>/.claude/skills/` |
+| `enablePiUser` | `true` | Load from `~/.pi/agent/skills/` |
+| `enablePiProject` | `true` | Load from `<cwd>/.pi/skills/` |
+| `enableSkillCommands` | `true` | Register skills as `/skill:name` commands |
+| `customDirectories` | `[]` | Additional directories to scan (supports `~` expansion) |
+| `ignoredSkills` | `[]` | Glob patterns to exclude (e.g., `["deprecated-*", "test-skill"]`) |
+| `includeSkills` | `[]` | Glob patterns to include (empty = all; e.g., `["git-*", "docker"]`) |
+
+**Note:** `ignoredSkills` takes precedence over both `includeSkills` in settings and the `--skills` CLI flag. A skill matching any ignore pattern will be excluded regardless of include patterns.
+
+### CLI Filtering
+
+Use `--skills` to filter skills for a specific invocation:
+
+```bash
+# Only load specific skills
+pi --skills git,docker
+
+# Glob patterns
+pi --skills "git-*,docker-*"
+
+# All skills matching a prefix
+pi --skills "aws-*"
+```
+
+This overrides the `includeSkills` setting for the current session.
+
 ## How Skills Work
 
 1. At startup, pi scans skill locations and extracts names + descriptions
@@ -153,6 +208,31 @@ Skills are discovered from these locations (later wins on name collision):
 4. The agent follows the instructions, using relative paths to reference scripts/assets
 
 This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.
+
+## Skill Commands
+
+Skills are automatically registered as slash commands with a `/skill:` prefix:
+
+```bash
+/skill:brave-search         # Load and execute the brave-search skill
+/skill:pdf-tools extract    # Load skill with arguments
+```
+
+Arguments after the command name are appended to the skill content as `User: <args>`.
+
+Toggle skill commands via `/settings` or in `settings.json`:
+
+```json
+{
+  "skills": {
+    "enableSkillCommands": true
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enableSkillCommands` | `true` | Register skills as `/skill:name` commands |
 
 ## Validation Warnings
 
@@ -233,3 +313,5 @@ Settings (`~/.pi/agent/settings.json`):
   }
 }
 ```
+
+Use the granular `enable*` flags to disable individual sources (e.g., `enableClaudeUser: false` to skip `~/.claude/skills`).

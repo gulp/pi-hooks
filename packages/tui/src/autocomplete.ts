@@ -1,7 +1,8 @@
 import { spawnSync } from "child_process";
-import { readdirSync } from "fs";
+import { readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
+import { fuzzyFilter } from "./fuzzy.js";
 
 // Use fd to walk directory tree (fast, respects .gitignore)
 function walkDirectoryWithFd(
@@ -126,18 +127,19 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const spaceIndex = textBeforeCursor.indexOf(" ");
 
 			if (spaceIndex === -1) {
-				// No space yet - complete command names
+				// No space yet - complete command names with fuzzy matching
 				const prefix = textBeforeCursor.slice(1); // Remove the "/"
-				const filtered = this.commands
-					.filter((cmd) => {
-						const name = "name" in cmd ? cmd.name : cmd.value; // Check if SlashCommand or AutocompleteItem
-						return name?.toLowerCase().startsWith(prefix.toLowerCase());
-					})
-					.map((cmd) => ({
-						value: "name" in cmd ? cmd.name : cmd.value,
-						label: "name" in cmd ? cmd.name : cmd.label,
-						...(cmd.description && { description: cmd.description }),
-					}));
+				const commandItems = this.commands.map((cmd) => ({
+					name: "name" in cmd ? cmd.name : cmd.value,
+					label: "name" in cmd ? cmd.name : cmd.label,
+					description: cmd.description,
+				}));
+
+				const filtered = fuzzyFilter(commandItems, prefix, (item) => item.name).map((item) => ({
+					value: item.name,
+					label: item.label,
+					...(item.description && { description: item.description }),
+				}));
 
 				if (filtered.length === 0) return null;
 
@@ -177,6 +179,18 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const suggestions = this.getFileSuggestions(pathMatch);
 			if (suggestions.length === 0) return null;
 
+			// Check if we have an exact match that is a directory
+			// In that case, we might want to return suggestions for the directory content instead
+			// But only if the prefix ends with /
+			if (suggestions.length === 1 && suggestions[0]?.value === pathMatch && !pathMatch.endsWith("/")) {
+				// Exact match found (e.g. user typed "src" and "src/" is the only match)
+				// We still return it so user can select it and add /
+				return {
+					items: suggestions,
+					prefix: pathMatch,
+				};
+			}
+
 			return {
 				items: suggestions,
 				prefix: pathMatch,
@@ -197,10 +211,12 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const beforePrefix = currentLine.slice(0, cursorCol - prefix.length);
 		const afterCursor = currentLine.slice(cursorCol);
 
-		// Check if we're completing a slash command (prefix starts with "/")
-		if (prefix.startsWith("/")) {
+		// Check if we're completing a slash command (prefix starts with "/" but NOT a file path)
+		// Slash commands are at the start of the line and don't contain path separators after the first /
+		const isSlashCommand = prefix.startsWith("/") && beforePrefix.trim() === "" && !prefix.slice(1).includes("/");
+		if (isSlashCommand) {
 			// This is a command name completion
-			const newLine = beforePrefix + "/" + item.value + " " + afterCursor;
+			const newLine = `${beforePrefix}/${item.value} ${afterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
 
@@ -214,7 +230,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		// Check if we're completing a file attachment (prefix starts with "@")
 		if (prefix.startsWith("@")) {
 			// This is a file attachment completion
-			const newLine = beforePrefix + item.value + " " + afterCursor;
+			const newLine = `${beforePrefix + item.value} ${afterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
 
@@ -297,7 +313,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		if (path.startsWith("~/")) {
 			const expandedPath = join(homedir(), path.slice(2));
 			// Preserve trailing slash if original path had one
-			return path.endsWith("/") && !expandedPath.endsWith("/") ? expandedPath + "/" : expandedPath;
+			return path.endsWith("/") && !expandedPath.endsWith("/") ? `${expandedPath}/` : expandedPath;
 		} else if (path === "~") {
 			return homedir();
 		}
@@ -367,7 +383,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					continue;
 				}
 
-				const isDirectory = entry.isDirectory();
+				// Check if entry is a directory (or a symlink pointing to a directory)
+				let isDirectory = entry.isDirectory();
+				if (!isDirectory && entry.isSymbolicLink()) {
+					try {
+						const fullPath = join(searchDir, entry.name);
+						isDirectory = statSync(fullPath).isDirectory();
+					} catch {
+						// Broken symlink or permission error - treat as file
+					}
+				}
 
 				let relativePath: string;
 				const name = entry.name;
@@ -376,20 +401,20 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				if (isAtPrefix) {
 					const pathWithoutAt = expandedPrefix;
 					if (pathWithoutAt.endsWith("/")) {
-						relativePath = "@" + pathWithoutAt + name;
+						relativePath = `@${pathWithoutAt}${name}`;
 					} else if (pathWithoutAt.includes("/")) {
 						if (pathWithoutAt.startsWith("~/")) {
 							const homeRelativeDir = pathWithoutAt.slice(2); // Remove ~/
 							const dir = dirname(homeRelativeDir);
-							relativePath = "@~/" + (dir === "." ? name : join(dir, name));
+							relativePath = `@~/${dir === "." ? name : join(dir, name)}`;
 						} else {
-							relativePath = "@" + join(dirname(pathWithoutAt), name);
+							relativePath = `@${join(dirname(pathWithoutAt), name)}`;
 						}
 					} else {
 						if (pathWithoutAt.startsWith("~")) {
-							relativePath = "@~/" + name;
+							relativePath = `@~/${name}`;
 						} else {
-							relativePath = "@" + name;
+							relativePath = `@${name}`;
 						}
 					}
 				} else if (prefix.endsWith("/")) {
@@ -400,14 +425,14 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					if (prefix.startsWith("~/")) {
 						const homeRelativeDir = prefix.slice(2); // Remove ~/
 						const dir = dirname(homeRelativeDir);
-						relativePath = "~/" + (dir === "." ? name : join(dir, name));
+						relativePath = `~/${dir === "." ? name : join(dir, name)}`;
 					} else if (prefix.startsWith("/")) {
 						// Absolute path - construct properly
 						const dir = dirname(prefix);
 						if (dir === "/") {
-							relativePath = "/" + name;
+							relativePath = `/${name}`;
 						} else {
-							relativePath = dir + "/" + name;
+							relativePath = `${dir}/${name}`;
 						}
 					} else {
 						relativePath = join(dirname(prefix), name);
@@ -415,30 +440,29 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				} else {
 					// For standalone entries, preserve ~/ if original prefix was ~/
 					if (prefix.startsWith("~")) {
-						relativePath = "~/" + name;
+						relativePath = `~/${name}`;
 					} else {
 						relativePath = name;
 					}
 				}
 
 				suggestions.push({
-					value: isDirectory ? relativePath + "/" : relativePath,
-					label: name,
-					description: isDirectory ? "directory" : "file",
+					value: isDirectory ? `${relativePath}/` : relativePath,
+					label: name + (isDirectory ? "/" : ""),
 				});
 			}
 
 			// Sort directories first, then alphabetically
 			suggestions.sort((a, b) => {
-				const aIsDir = a.description === "directory";
-				const bIsDir = b.description === "directory";
+				const aIsDir = a.value.endsWith("/");
+				const bIsDir = b.value.endsWith("/");
 				if (aIsDir && !bIsDir) return -1;
 				if (!aIsDir && bIsDir) return 1;
 				return a.label.localeCompare(b.label);
 			});
 
 			return suggestions;
-		} catch (e) {
+		} catch (_e) {
 			// Directory doesn't exist or not accessible
 			return [];
 		}
@@ -498,7 +522,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const entryName = basename(pathWithoutSlash);
 
 				suggestions.push({
-					value: "@" + entryPath,
+					value: `@${entryPath}`,
 					label: entryName + (isDirectory ? "/" : ""),
 					description: pathWithoutSlash,
 				});

@@ -27,6 +27,9 @@ interface ModelsDevModel {
 	modalities?: {
 		input?: string[];
 	};
+	provider?: {
+		npm?: string;
+	};
 }
 
 const COPILOT_STATIC_HEADERS = {
@@ -258,28 +261,32 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process xAi models
+		// Process zAi models
 		if (data.zai?.models) {
 			for (const [modelId, model] of Object.entries(data.zai.models)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
+				const supportsImage = m.modalities?.input?.includes("image")
 
 				models.push({
-					id: modelId,
-					name: m.name || modelId,
-					api: "anthropic-messages",
-					provider: "zai",
-					baseUrl: "https://api.z.ai/api/anthropic",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+				id: modelId,
+				name: m.name || modelId,
+				api: "openai-completions",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+				reasoning: m.reasoning === true,
+				input: supportsImage ? ["text", "image"] : ["text"],
+				cost: {
+					input: m.cost?.input || 0,
+					output: m.cost?.output || 0,
+					cacheRead: m.cost?.cache_read || 0,
+					cacheWrite: m.cost?.cache_write || 0,
+				},
+				compat: {
+					supportsDeveloperRole: false,
+				},
+				contextWindow: m.limit?.context || 4096,
+				maxTokens: m.limit?.output || 4096,
 				});
 			}
 		}
@@ -296,6 +303,57 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					api: "openai-completions",
 					provider: "mistral",
 					baseUrl: "https://api.mistral.ai/v1",
+					reasoning: m.reasoning === true,
+					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					cost: {
+						input: m.cost?.input || 0,
+						output: m.cost?.output || 0,
+						cacheRead: m.cost?.cache_read || 0,
+						cacheWrite: m.cost?.cache_write || 0,
+					},
+					contextWindow: m.limit?.context || 4096,
+					maxTokens: m.limit?.output || 4096,
+				});
+			}
+		}
+
+		// Process OpenCode Zen models
+		// API mapping based on provider.npm field:
+		// - @ai-sdk/openai → openai-responses
+		// - @ai-sdk/anthropic → anthropic-messages
+		// - @ai-sdk/google → google-generative-ai
+		// - null/undefined/@ai-sdk/openai-compatible → openai-completions
+		if (data.opencode?.models) {
+			for (const [modelId, model] of Object.entries(data.opencode.models)) {
+				const m = model as ModelsDevModel;
+				if (m.tool_call !== true) continue;
+
+				const npm = m.provider?.npm;
+				let api: Api;
+				let baseUrl: string;
+
+				if (npm === "@ai-sdk/openai") {
+					api = "openai-responses";
+					baseUrl = "https://opencode.ai/zen/v1";
+				} else if (npm === "@ai-sdk/anthropic") {
+					api = "anthropic-messages";
+					// Anthropic SDK appends /v1/messages to baseURL
+					baseUrl = "https://opencode.ai/zen";
+				} else if (npm === "@ai-sdk/google") {
+					api = "google-generative-ai";
+					baseUrl = "https://opencode.ai/zen/v1";
+				} else {
+					// null, undefined, or @ai-sdk/openai-compatible
+					api = "openai-completions";
+					baseUrl = "https://opencode.ai/zen/v1";
+				}
+
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api,
+					provider: "opencode",
+					baseUrl,
 					reasoning: m.reasoning === true,
 					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
 					cost: {
@@ -438,6 +496,76 @@ async function generateModels() {
 		});
 	}
 
+	// OpenAI Codex (ChatGPT OAuth) models
+	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
+	// Context window is based on observed server limits (400s above ~272k), not marketing numbers.
+	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+	const CODEX_CONTEXT = 272000;
+	const CODEX_MAX_TOKENS = 128000;
+	const codexModels: Model<"openai-codex-responses">[] = [
+		{
+			id: "gpt-5.1",
+			name: "GPT-5.1",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.1-codex-max",
+			name: "GPT-5.1 Codex Max",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.1-codex-mini",
+			name: "GPT-5.1 Codex Mini",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.2",
+			name: "GPT-5.2",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-5.2-codex",
+			name: "GPT-5.2 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+	];
+	allModels.push(...codexModels);
+
 	// Add missing Grok models
 	if (!allModels.some(m => m.provider === "xai" && m.id === "grok-code-fast-1")) {
 		allModels.push({
@@ -482,96 +610,302 @@ async function generateModels() {
 		});
 	}
 
-	// Add Google Cloud Code Assist models (Gemini CLI / Antigravity)
-	// These use OAuth authentication via Google account, cost is $0 (uses account quota)
+	// Google Cloud Code Assist models (Gemini CLI)
+	// Uses production endpoint, standard Gemini models only
 	const CLOUD_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
-	const cloudCodeAssistModels: Model<"google-cloud-code-assist">[] = [
+	const cloudCodeAssistModels: Model<"google-gemini-cli">[] = [
 		{
-			id: "gemini-3-pro-high",
-			name: "Gemini 3 Pro High (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
+			id: "gemini-2.5-pro",
+			name: "Gemini 2.5 Pro (Cloud Code Assist)",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
 			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65535,
+		},
+		{
+			id: "gemini-2.5-flash",
+			name: "Gemini 2.5 Flash (Cloud Code Assist)",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65535,
+		},
+		{
+			id: "gemini-2.0-flash",
+			name: "Gemini 2.0 Flash (Cloud Code Assist)",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 8192,
+		},
+		{
+			id: "gemini-3-pro-preview",
+			name: "Gemini 3 Pro Preview (Cloud Code Assist)",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65535,
+		},
+		{
+			id: "gemini-3-flash-preview",
+			name: "Gemini 3 Flash Preview (Cloud Code Assist)",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65535,
+		},
+	];
+	allModels.push(...cloudCodeAssistModels);
+
+	// Antigravity models (Gemini 3, Claude, GPT-OSS via Google Cloud)
+	// Uses sandbox endpoint and different OAuth credentials for access to additional models
+	const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+	const antigravityModels: Model<"google-gemini-cli">[] = [
+		{
+			id: "gemini-3-pro-high",
+			name: "Gemini 3 Pro High (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
+			reasoning: true,
+			input: ["text", "image"],
+			// the Model type doesn't seem to support having extended-context costs, so I'm just using the pricing for <200k input
+			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.375 },
 			contextWindow: 1048576,
 			maxTokens: 65535,
 		},
 		{
 			id: "gemini-3-pro-low",
-			name: "Gemini 3 Pro Low (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
-			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			name: "Gemini 3 Pro Low (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
 			reasoning: true,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// the Model type doesn't seem to support having extended-context costs, so I'm just using the pricing for <200k input
+			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.375 },
 			contextWindow: 1048576,
 			maxTokens: 65535,
 		},
 		{
 			id: "gemini-3-flash",
-			name: "Gemini 3 Flash (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
-			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
-			reasoning: false,
+			name: "Gemini 3 Flash (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
+			reasoning: true,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: { input: 0.5, output: 3, cacheRead: 0.5, cacheWrite: 0 },
 			contextWindow: 1048576,
-			maxTokens: 65536,
+			maxTokens: 65535,
 		},
 		{
 			id: "claude-sonnet-4-5",
-			name: "Claude Sonnet 4.5 (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
-			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			name: "Claude Sonnet 4.5 (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
 			reasoning: false,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 			contextWindow: 200000,
 			maxTokens: 64000,
 		},
 		{
 			id: "claude-sonnet-4-5-thinking",
-			name: "Claude Sonnet 4.5 Thinking (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
-			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			name: "Claude Sonnet 4.5 Thinking (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
 			reasoning: true,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 			contextWindow: 200000,
 			maxTokens: 64000,
 		},
 		{
 			id: "claude-opus-4-5-thinking",
-			name: "Claude Opus 4.5 Thinking (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
-			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			name: "Claude Opus 4.5 Thinking (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
 			reasoning: true,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
 			contextWindow: 200000,
 			maxTokens: 64000,
 		},
 		{
 			id: "gpt-oss-120b-medium",
-			name: "GPT-OSS 120B Medium (Cloud Code Assist)",
-			api: "google-cloud-code-assist",
-			provider: "google-cloud-code-assist",
-			baseUrl: CLOUD_CODE_ASSIST_ENDPOINT,
+			name: "GPT-OSS 120B Medium (Antigravity)",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_ENDPOINT,
 			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			input: ["text"],
+			cost: { input: 0.09, output: 0.36, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 131072,
 			maxTokens: 32768,
 		},
 	];
-	allModels.push(...cloudCodeAssistModels);
+	allModels.push(...antigravityModels);
+
+	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
+	const vertexModels: Model<"google-vertex">[] = [
+		{
+			id: "gemini-3-pro-preview",
+			name: "Gemini 3 Pro Preview (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 64000,
+		},
+		{
+			id: "gemini-3-flash-preview",
+			name: "Gemini 3 Flash Preview (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-2.0-flash",
+			name: "Gemini 2.0 Flash (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0.15, output: 0.6, cacheRead: 0.0375, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 8192,
+		},
+		{
+			id: "gemini-2.0-flash-lite",
+			name: "Gemini 2.0 Flash Lite (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.075, output: 0.3, cacheRead: 0.01875, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-2.5-pro",
+			name: "Gemini 2.5 Pro (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-2.5-flash",
+			name: "Gemini 2.5 Flash (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-2.5-flash-lite-preview-09-2025",
+			name: "Gemini 2.5 Flash Lite Preview 09-25 (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-2.5-flash-lite",
+			name: "Gemini 2.5 Flash Lite (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-1.5-pro",
+			name: "Gemini 1.5 Pro (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 5, cacheRead: 0.3125, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+		},
+		{
+			id: "gemini-1.5-flash",
+			name: "Gemini 1.5 Flash (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0.075, output: 0.3, cacheRead: 0.01875, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+		},
+		{
+			id: "gemini-1.5-flash-8b",
+			name: "Gemini 1.5 Flash-8B (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0.0375, output: 0.15, cacheRead: 0.01, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+		},
+	];
+	allModels.push(...vertexModels);
 
 	// Group by provider and deduplicate by model ID
 	const providers: Record<string, Record<string, Model<any>>> = {};
@@ -595,11 +929,15 @@ import type { Model } from "./types.js";
 export const MODELS = {
 `;
 
-	// Generate provider sections
-	for (const [providerId, models] of Object.entries(providers)) {
+	// Generate provider sections (sorted for deterministic output)
+	const sortedProviderIds = Object.keys(providers).sort();
+	for (const providerId of sortedProviderIds) {
+		const models = providers[providerId];
 		output += `\t${JSON.stringify(providerId)}: {\n`;
 
-		for (const model of Object.values(models)) {
+		const sortedModelIds = Object.keys(models).sort();
+		for (const modelId of sortedModelIds) {
+			const model = models[modelId];
 			output += `\t\t"${model.id}": {\n`;
 			output += `\t\t\tid: "${model.id}",\n`;
 			output += `\t\t\tname: "${model.name}",\n`;

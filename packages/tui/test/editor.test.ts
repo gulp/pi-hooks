@@ -275,6 +275,26 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Shift+Enter handling", () => {
+		it("treats split VS Code Shift+Enter as a newline", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("\\");
+			editor.handleInput("\r");
+
+			assert.strictEqual(editor.getText(), "\n");
+		});
+
+		it("inserts a literal backslash when not followed by Enter", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("\\");
+			editor.handleInput("x");
+
+			assert.strictEqual(editor.getText(), "\\x");
+		});
+	});
+
 	describe("Unicode text editing behavior", () => {
 		it("inserts mixed ASCII, umlauts, and emojis as literal text", () => {
 			const editor = new Editor(defaultEditorTheme);
@@ -396,6 +416,84 @@ describe("Editor component", () => {
 			const text = editor.getText();
 			assert.strictEqual(text, "xab");
 		});
+
+		it("deletes words correctly with Ctrl+W and Alt+Backspace", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			// Basic word deletion
+			editor.setText("foo bar baz");
+			editor.handleInput("\x17"); // Ctrl+W
+			assert.strictEqual(editor.getText(), "foo bar ");
+
+			// Trailing whitespace
+			editor.setText("foo bar   ");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "foo ");
+
+			// Punctuation run
+			editor.setText("foo bar...");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "foo bar");
+
+			// Delete across multiple lines
+			editor.setText("line one\nline two");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "line one\nline ");
+
+			// Delete empty line (merge)
+			editor.setText("line one\n");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "line one");
+
+			// Grapheme safety (emoji as a word)
+			editor.setText("foo 😀😀 bar");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "foo 😀😀 ");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "foo ");
+
+			// Alt+Backspace
+			editor.setText("foo bar");
+			editor.handleInput("\x1b\x7f"); // Alt+Backspace (legacy)
+			assert.strictEqual(editor.getText(), "foo ");
+		});
+
+		it("navigates words correctly with Ctrl+Left/Right", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.setText("foo bar... baz");
+			// Cursor at end
+
+			// Move left over baz
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 11 }); // after '...'
+
+			// Move left over punctuation
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 }); // after 'bar'
+
+			// Move left over bar
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 4 }); // after 'foo '
+
+			// Move right over bar
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 }); // at end of 'bar'
+
+			// Move right over punctuation run
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 10 }); // after '...'
+
+			// Move right skips space and lands after baz
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 14 }); // end of line
+
+			// Test forward from start with leading whitespace
+			editor.setText("   foo bar");
+			editor.handleInput("\x01"); // Ctrl+A to go to start
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 6 }); // after 'foo'
+		});
 	});
 
 	describe("Grapheme-aware text wrapping", () => {
@@ -496,6 +594,101 @@ describe("Editor component", () => {
 				const lineWidth = visibleWidth(lines[i]!);
 				assert.ok(lineWidth <= width, `Line ${i} has width ${lineWidth}, exceeds max ${width}`);
 			}
+		});
+	});
+
+	describe("Word wrapping", () => {
+		it("wraps at word boundaries instead of mid-word", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const width = 40;
+
+			editor.setText("Hello world this is a test of word wrapping functionality");
+			const lines = editor.render(width);
+
+			// Get content lines (between borders)
+			const contentLines = lines.slice(1, -1).map((l) => stripVTControlCharacters(l).trim());
+
+			// Should NOT break mid-word
+			// Line 1 should end with a complete word
+			assert.ok(!contentLines[0]!.endsWith("-"), "Line should not end with hyphen (mid-word break)");
+
+			// Each content line should be complete words
+			for (const line of contentLines) {
+				// Words at end of line should be complete (no partial words)
+				const lastChar = line.trimEnd().slice(-1);
+				assert.ok(lastChar === "" || /[\w.,!?;:]/.test(lastChar), `Line ends unexpectedly with: "${lastChar}"`);
+			}
+		});
+
+		it("does not start lines with leading whitespace after word wrap", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const width = 20;
+
+			editor.setText("Word1 Word2 Word3 Word4 Word5 Word6");
+			const lines = editor.render(width);
+
+			// Get content lines (between borders)
+			const contentLines = lines.slice(1, -1);
+
+			// No line should start with whitespace (except for padding at the end)
+			for (let i = 0; i < contentLines.length; i++) {
+				const line = stripVTControlCharacters(contentLines[i]!);
+				const trimmedStart = line.trimStart();
+				// The line should either be all padding or start with a word character
+				if (trimmedStart.length > 0) {
+					assert.ok(!/^\s+\S/.test(line.trimEnd()), `Line ${i} starts with unexpected whitespace before content`);
+				}
+			}
+		});
+
+		it("breaks long words (URLs) at character level", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const width = 30;
+
+			editor.setText("Check https://example.com/very/long/path/that/exceeds/width here");
+			const lines = editor.render(width);
+
+			// All lines should fit within width
+			for (let i = 1; i < lines.length - 1; i++) {
+				const lineWidth = visibleWidth(lines[i]!);
+				assert.strictEqual(lineWidth, width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+			}
+		});
+
+		it("preserves multiple spaces within words on same line", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const width = 50;
+
+			editor.setText("Word1   Word2    Word3");
+			const lines = editor.render(width);
+
+			const contentLine = stripVTControlCharacters(lines[1]!).trim();
+			// Multiple spaces should be preserved
+			assert.ok(contentLine.includes("Word1   Word2"), "Multiple spaces should be preserved");
+		});
+
+		it("handles empty string", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const width = 40;
+
+			editor.setText("");
+			const lines = editor.render(width);
+
+			// Should have border + empty content + border
+			assert.strictEqual(lines.length, 3);
+		});
+
+		it("handles single word that fits exactly", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const width = 10;
+
+			editor.setText("1234567890");
+			const lines = editor.render(width);
+
+			// Should have exactly 3 lines (top border, content, bottom border)
+			assert.strictEqual(lines.length, 3);
+			const contentLine = stripVTControlCharacters(lines[1]!);
+			assert.ok(contentLine.includes("1234567890"), "Content should contain the word");
 		});
 	});
 });

@@ -7,7 +7,40 @@ import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { transformMessages } from "./transorm-messages.js";
 
-type GoogleApiType = "google-generative-ai" | "google-cloud-code-assist";
+type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
+
+/**
+ * Determines whether a streamed Gemini `Part` should be treated as "thinking".
+ *
+ * Protocol note (Gemini / Vertex AI thought signatures):
+ * - `thought: true` is the definitive marker for thinking content (thought summaries).
+ * - `thoughtSignature` is an encrypted representation of the model's internal thought process
+ *   used to preserve reasoning context across multi-turn interactions.
+ * - `thoughtSignature` can appear on ANY part type (text, functionCall, etc.) - it does NOT
+ *   indicate the part itself is thinking content.
+ * - For non-functionCall responses, the signature appears on the last part for context replay.
+ * - When persisting/replaying model outputs, signature-bearing parts must be preserved as-is;
+ *   do not merge/move signatures across parts.
+ *
+ * See: https://ai.google.dev/gemini-api/docs/thought-signatures
+ */
+export function isThinkingPart(part: Pick<Part, "thought" | "thoughtSignature">): boolean {
+	return part.thought === true;
+}
+
+/**
+ * Retain thought signatures during streaming.
+ *
+ * Some backends only send `thoughtSignature` on the first delta for a given part/block; later deltas may omit it.
+ * This helper preserves the last non-empty signature for the current block.
+ *
+ * Note: this does NOT merge or move signatures across distinct response parts. It only prevents
+ * a signature from being overwritten with `undefined` within the same streamed block.
+ */
+export function retainThoughtSignature(existing: string | undefined, incoming: string | undefined): string | undefined {
+	if (typeof incoming === "string" && incoming.length > 0) return incoming;
+	return existing;
+}
 
 /**
  * Convert internal messages to Gemini Content[] format.
@@ -45,21 +78,36 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
+			// Check if message is from same provider and model - only then keep thinking blocks
+			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
-					parts.push({ text: sanitizeSurrogates(block.text) });
+					// Skip empty text blocks - they can cause issues with some models (e.g. Claude via Antigravity)
+					if (!block.text || block.text.trim() === "") continue;
+					parts.push({
+						text: sanitizeSurrogates(block.text),
+						...(block.textSignature && { thoughtSignature: block.textSignature }),
+					});
 				} else if (block.type === "thinking") {
-					const thinkingPart: Part = {
-						thought: true,
-						thoughtSignature: block.thinkingSignature,
-						text: sanitizeSurrogates(block.thinking),
-					};
-					parts.push(thinkingPart);
+					// Skip empty thinking blocks
+					if (!block.thinking || block.thinking.trim() === "") continue;
+					// Only keep as thinking block if same provider AND same model
+					// Otherwise convert to plain text (no tags to avoid model mimicking them)
+					if (isSameProviderAndModel) {
+						parts.push({
+							thought: true,
+							text: sanitizeSurrogates(block.thinking),
+							...(block.thinkingSignature && { thoughtSignature: block.thinkingSignature }),
+						});
+					} else {
+						parts.push({
+							text: sanitizeSurrogates(block.thinking),
+						});
+					}
 				} else if (block.type === "toolCall") {
 					const part: Part = {
 						functionCall: {
-							id: block.id,
 							name: block.name,
 							args: block.arguments,
 						},
@@ -77,9 +125,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				parts,
 			});
 		} else if (msg.role === "toolResult") {
-			// Build parts array with functionResponse and/or images
-			const parts: Part[] = [];
-
 			// Extract text and image content
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map((c) => c.text).join("\n");
@@ -87,35 +132,52 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				? msg.content.filter((c): c is ImageContent => c.type === "image")
 				: [];
 
-			// Always add functionResponse with text result (or placeholder if only images)
 			const hasText = textResult.length > 0;
 			const hasImages = imageContent.length > 0;
+
+			// Gemini 3 supports multimodal function responses with images nested inside functionResponse.parts
+			// See: https://ai.google.dev/gemini-api/docs/function-calling#multimodal
+			// Older models don't support this, so we put images in a separate user message.
+			const supportsMultimodalFunctionResponse = model.id.includes("gemini-3");
 
 			// Use "output" key for success, "error" key for errors as per SDK documentation
 			const responseValue = hasText ? sanitizeSurrogates(textResult) : hasImages ? "(see attached image)" : "";
 
-			parts.push({
+			const imageParts: Part[] = imageContent.map((imageBlock) => ({
+				inlineData: {
+					mimeType: imageBlock.mimeType,
+					data: imageBlock.data,
+				},
+			}));
+
+			const functionResponsePart: Part = {
 				functionResponse: {
-					id: msg.toolCallId,
 					name: msg.toolName,
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
+					// Nest images inside functionResponse.parts for Gemini 3
+					...(hasImages && supportsMultimodalFunctionResponse && { parts: imageParts }),
 				},
-			});
+			};
 
-			// Add any images as inlineData parts
-			for (const imageBlock of imageContent) {
-				parts.push({
-					inlineData: {
-						mimeType: imageBlock.mimeType,
-						data: imageBlock.data,
-					},
+			// Cloud Code Assist API requires all function responses to be in a single user turn.
+			// Check if the last content is already a user turn with function responses and merge.
+			const lastContent = contents[contents.length - 1];
+			if (lastContent?.role === "user" && lastContent.parts?.some((p) => p.functionResponse)) {
+				lastContent.parts.push(functionResponsePart);
+			} else {
+				contents.push({
+					role: "user",
+					parts: [functionResponsePart],
 				});
 			}
 
-			contents.push({
-				role: "user",
-				parts,
-			});
+			// For older models, add images in a separate user message
+			if (hasImages && !supportsMultimodalFunctionResponse) {
+				contents.push({
+					role: "user",
+					parts: [{ text: "Tool result image:" }, ...imageParts],
+				});
+			}
 		}
 	}
 
