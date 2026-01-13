@@ -431,16 +431,6 @@ function formatLoopEntriesText(loopDetails: RalphLoopDetails): string {
 	return lines.join("\n").trim();
 }
 
-function appendLoopLogToSession(ctx: any, log: string) {
-	if (!log) return;
-	const sessionManager = ctx?.sessionManager;
-	if (!sessionManager?.appendCustomMessageEntry) return;
-	try {
-		sessionManager.appendCustomMessageEntry("ralph-loop-log", log, true, { source: "ralph_loop" });
-	} catch {
-		// ignore
-	}
-}
 
 function truncateComponentLines(component: any, maxLines: number, theme: any) {
 	return {
@@ -2232,7 +2222,6 @@ export default function (pi: ExtensionAPI) {
 
 			const finalDetails = buildLoopDetails(iterations);
 			const exportText = formatLoopEntriesText(finalDetails);
-			appendLoopLogToSession(ctx, exportText);
 			const summaryText = exportText
 				? `${summaryLines.join("\n\n")}\n\nDetails:\n${exportText}`
 				: summaryLines.join("\n\n");
