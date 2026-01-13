@@ -2089,6 +2089,9 @@ export default function (pi: ExtensionAPI) {
 					lastCondition,
 					prompt: promptInfo,
 					steering: [...loopControl.steering, ...loopControl.steeringOnce],
+					followUps: [...loopControl.followUps],
+					steeringSent: [...loopControl.steeringSent],
+					followUpsSent: [...loopControl.followUpsSent],
 					status: loopControl.status,
 				};
 				loopControl.iterations = currentIterations.length;
