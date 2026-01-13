@@ -66,14 +66,14 @@ pi --extension ./lsp/lsp-tool.ts   # Just the LSP tool
 
 Layered permission control with four permission levels:
 
-| Level  | Description           | What's allowed                                      |
-|--------|-----------------------|-----------------------------------------------------|
-| Off    | Read-only mode        | Only read commands (ls, cat, git status, etc.)      |
-| Low    | File edits            | + write/edit files                                  |
-| Medium | Dev commands          | + npm, git, make, cargo, etc.                       |
-| High   | Full access           | Everything (dangerous commands still prompt)        |
+| Level   | Description           | What's allowed                                      |
+|---------|-----------------------|-----------------------------------------------------|
+| Minimal | Read-only mode        | Only read commands (ls, cat, git status, etc.)      |
+| Low     | File edits            | + write/edit files                                  |
+| Medium  | Dev commands          | + npm, git, make, cargo, etc.                       |
+| High    | Full access           | Everything (dangerous commands still prompt)        |
 
-On first run you pick a level; it's saved globally. You can escalate mid-session when needed.
+On first run you pick a level; it's saved globally. Use `/permission` to change levels and `/permission-mode` to switch between ask/block prompts.
 
 <img src="assets/permission-screenshot.png" alt="Permission Extension" width="500">
 
@@ -89,7 +89,6 @@ Looped subagent execution via the `ralph_loop` tool.
 - Optionally supply model and thinking
 - Supports `conditionCommand`, `maxIterations`, and `sleepMs` controls
 - Interactive steering/follow-up + pause/resume/stop commands in UI mode
-- Exported HTML includes a loop log
 - Defaults to the `worker` agent and the last user prompt when omitted
 - No npm install required
 
