@@ -1,8 +1,10 @@
+import { randomUUID } from "crypto";
 import {
 	ActionRowBuilder,
 	ActivityType,
 	AttachmentBuilder,
 	ButtonBuilder,
+	type ButtonInteraction,
 	ButtonStyle,
 	ChannelType,
 	type ChatInputCommandInteraction,
@@ -42,6 +44,65 @@ const DISCORD_EMBED_DESCRIPTION_MAX_CHARS = 3900;
 const MAX_EVENT_QUEUE_SIZE = 5;
 
 type QueuedWork = () => Promise<void>;
+
+type PendingQuestion = {
+	questionId: string;
+	channelId: string;
+	userId: string;
+	prompt: string;
+	options: string[];
+	message: Message;
+	timeout: NodeJS.Timeout;
+	resolve: (value: { index: number; option: string }) => void;
+	reject: (error: Error) => void;
+	signal?: AbortSignal;
+	abortListener?: () => void;
+};
+
+function buildQuestionActionRows(
+	questionId: string,
+	options: string[],
+	params?: { disabled?: boolean; selectedIndex?: number },
+): ActionRowBuilder<ButtonBuilder>[] {
+	if (options.length < 2) {
+		throw new Error("question options must have at least 2 items");
+	}
+	if (options.length > 25) {
+		throw new Error("question options may not exceed 25 items");
+	}
+
+	const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+	let row = new ActionRowBuilder<ButtonBuilder>();
+
+	for (let i = 0; i < options.length; i++) {
+		const option = options[i]!;
+		const label = option.length > 80 ? `${option.slice(0, 77)}...` : option;
+
+		let style: ButtonStyle = ButtonStyle.Primary;
+		if (params?.selectedIndex === i) {
+			style = ButtonStyle.Success;
+		}
+
+		const button = new ButtonBuilder()
+			.setCustomId(`mom-q-${questionId}-${i}`)
+			.setLabel(label)
+			.setStyle(style)
+			.setDisabled(Boolean(params?.disabled));
+
+		row.addComponents(button);
+
+		if (row.components.length >= 5) {
+			rows.push(row);
+			row = new ActionRowBuilder<ButtonBuilder>();
+		}
+	}
+
+	if (row.components.length > 0) {
+		rows.push(row);
+	}
+
+	return rows;
+}
 
 class ChannelQueue {
 	private queue: QueuedWork[] = [];
@@ -91,6 +152,7 @@ export class MomDiscordBot {
 	private userCache = new Map<string, { userName: string; displayName: string }>();
 	private channelCache = new Map<string, string>();
 	private queues = new Map<string, ChannelQueue>();
+	private pendingQuestions = new Map<string, PendingQuestion>();
 	private workingDir: string;
 	private settingsManager?: MomSettingsManager;
 
@@ -239,8 +301,84 @@ export class MomDiscordBot {
 				if (this.handler.onStopButton) {
 					await this.handler.onStopButton(channelId);
 				}
+				return;
+			}
+
+			if (interaction.customId.startsWith("mom-q-")) {
+				await this.handleQuestionButton(interaction);
 			}
 		});
+	}
+
+	private async handleQuestionButton(interaction: ButtonInteraction): Promise<void> {
+		const match = /^mom-q-([a-zA-Z0-9]+)-(\d+)$/.exec(interaction.customId);
+		if (!match) return;
+
+		const questionId = match[1]!;
+		const index = Number(match[2]!);
+
+		const pending = this.pendingQuestions.get(questionId);
+		if (!pending) {
+			try {
+				await interaction.reply({ content: "That question has expired.", ephemeral: true });
+			} catch {
+				// ignore
+			}
+			return;
+		}
+
+		if (!Number.isInteger(index) || index < 0 || index >= pending.options.length) {
+			try {
+				await interaction.reply({ content: "Invalid option.", ephemeral: true });
+			} catch {
+				// ignore
+			}
+			return;
+		}
+
+		if (interaction.user.id !== pending.userId) {
+			try {
+				await interaction.reply({
+					content: `Only <@${pending.userId}> can answer this question.`,
+					ephemeral: true,
+				});
+			} catch {
+				// ignore
+			}
+			return;
+		}
+
+		this.pendingQuestions.delete(questionId);
+		clearTimeout(pending.timeout);
+		if (pending.signal && pending.abortListener) {
+			pending.signal.removeEventListener("abort", pending.abortListener);
+		}
+
+		try {
+			await interaction.deferUpdate();
+		} catch (err) {
+			// Interaction may have expired (Discord interactions expire after 3 seconds)
+			// Error code 10062 = "Unknown interaction"
+			const isExpired = err instanceof Error && "code" in err && (err as { code: number }).code === 10062;
+			if (!isExpired) {
+				log.logWarning(
+					"Discord: Failed to defer question button interaction",
+					err instanceof Error ? err.message : String(err),
+				);
+			}
+		}
+
+		const option = pending.options[index]!;
+		try {
+			await pending.message.edit({
+				content: `${pending.prompt}\n\nSelected: **${option}**`,
+				components: buildQuestionActionRows(questionId, pending.options, { disabled: true, selectedIndex: index }),
+			});
+		} catch {
+			// ignore
+		}
+
+		pending.resolve({ index, option });
 	}
 
 	// ==========================================================================
@@ -660,10 +798,12 @@ export class MomDiscordBot {
 			}
 		};
 
-		// Track showToolResults state for this context (mutable for toggle button)
-		// If collapseDetailsOnComplete is enabled, start collapsed
+		// Tool result visibility settings
+		// - showToolResultsEnabled controls whether tool results are posted at all.
+		// - showToolResultsExpanded controls whether we include full args/results (vs a collapsed title-only view).
 		const collapseOnComplete = this.settingsManager?.collapseDetailsOnComplete ?? false;
-		const localShowToolResults = collapseOnComplete ? false : (this.settingsManager?.showToolResults ?? true);
+		const showToolResultsEnabled = this.settingsManager?.showToolResults ?? true;
+		const showToolResultsExpanded = showToolResultsEnabled && !collapseOnComplete;
 
 		const buildStopButton = (): ActionRowBuilder<ButtonBuilder> => {
 			const stopButton = new ButtonBuilder()
@@ -747,7 +887,7 @@ export class MomDiscordBot {
 			// Initial "running" embed - show collapsed version if collapseOnComplete is enabled
 			const runningEmbed = new EmbedBuilder().setTitle(title).setColor(0x808080); // Gray for running
 
-			if (localShowToolResults && data.args?.trim()) {
+			if (showToolResultsExpanded && data.args?.trim()) {
 				const truncatedArgs =
 					data.args.length > DISCORD_EMBED_ARGS_MAX_CHARS
 						? `${data.args.slice(0, DISCORD_EMBED_ARGS_MAX_CHARS - 3)}...`
@@ -809,7 +949,7 @@ export class MomDiscordBot {
 				.setFooter({ text: `Duration: ${data.durationSecs}s` });
 
 			// Choose which embed to show based on current state
-			const embedToShow = localShowToolResults ? fullEmbed : collapsedEmbed;
+			const embedToShow = showToolResultsExpanded ? fullEmbed : collapsedEmbed;
 
 			// Check if we have a pending message to update
 			const pending = pendingToolMessages.get(data.toolCallId);
@@ -866,7 +1006,7 @@ export class MomDiscordBot {
 					.setAuthor({ name: formatterOutput.title ?? "Usage Summary" });
 
 				// Buffer for posting after final response
-				bufferedUsageSummaryEmbed = localShowToolResults ? fullEmbed : collapsedEmbed;
+				bufferedUsageSummaryEmbed = showToolResultsExpanded ? fullEmbed : collapsedEmbed;
 				return;
 			}
 
@@ -908,7 +1048,7 @@ export class MomDiscordBot {
 				.setAuthor({ name: `Usage: ${formatCost(data.cost.total)}` });
 
 			// Buffer for posting after final response
-			const embedToShow = localShowToolResults ? fullEmbed : collapsedEmbed;
+			const embedToShow = showToolResultsExpanded ? fullEmbed : collapsedEmbed;
 			bufferedUsageSummaryEmbed = embedToShow;
 		};
 
@@ -927,7 +1067,7 @@ export class MomDiscordBot {
 			duplicateResponseToDetails: false,
 			showDetails: this.settingsManager?.showDetails ?? true,
 			get showToolResults() {
-				return localShowToolResults;
+				return showToolResultsEnabled;
 			},
 
 			send: async (target, content, opts) => {
@@ -1385,6 +1525,81 @@ export class MomDiscordBot {
 		});
 
 		return true;
+	}
+
+	async askQuestion(params: {
+		channelId: string;
+		userId: string;
+		prompt: string;
+		options: string[];
+		timeoutMs: number;
+		signal?: AbortSignal;
+	}): Promise<{ index: number; option: string }> {
+		const channel = await this.client.channels.fetch(params.channelId).catch(() => null);
+		if (!channel || !channel.isTextBased() || !this.isSendableTextChannel(channel)) {
+			throw new Error(`Channel ${params.channelId} not found or not text-based`);
+		}
+
+		const questionId = randomUUID().replace(/-/g, "");
+		const components = buildQuestionActionRows(questionId, params.options);
+		const message = await (channel as PartialTextBasedChannelFields<boolean>).send({
+			content: params.prompt,
+			components,
+		});
+
+		return await new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				const pending = this.pendingQuestions.get(questionId);
+				if (!pending) return;
+				this.pendingQuestions.delete(questionId);
+				if (pending.signal && pending.abortListener) {
+					pending.signal.removeEventListener("abort", pending.abortListener);
+				}
+				void message
+					.edit({
+						content: `${params.prompt}\n\n*(Timed out waiting for a selection.)*`,
+						components: buildQuestionActionRows(questionId, params.options, { disabled: true }),
+					})
+					.catch(() => {});
+				reject(new Error("Question timed out"));
+			}, params.timeoutMs);
+
+			const entry: PendingQuestion = {
+				questionId,
+				channelId: params.channelId,
+				userId: params.userId,
+				prompt: params.prompt,
+				options: params.options,
+				message,
+				timeout,
+				resolve,
+				reject,
+			};
+
+			if (params.signal) {
+				const onAbort = () => {
+					const pending = this.pendingQuestions.get(questionId);
+					if (!pending) return;
+					this.pendingQuestions.delete(questionId);
+					clearTimeout(timeout);
+					if (pending.signal && pending.abortListener) {
+						pending.signal.removeEventListener("abort", pending.abortListener);
+					}
+					void message
+						.edit({
+							content: `${params.prompt}\n\n*(Canceled.)*`,
+							components: buildQuestionActionRows(questionId, params.options, { disabled: true }),
+						})
+						.catch(() => {});
+					reject(new Error("Question aborted"));
+				};
+				entry.signal = params.signal;
+				entry.abortListener = onAbort;
+				params.signal.addEventListener("abort", onAbort, { once: true });
+			}
+
+			this.pendingQuestions.set(questionId, entry);
+		});
 	}
 
 	async addReaction(

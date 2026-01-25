@@ -1,12 +1,5 @@
-import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import {
-	type Api,
-	getModels,
-	getProviders,
-	type ImageContent,
-	type KnownProvider,
-	type Model,
-} from "@mariozechner/pi-ai";
+import { Agent, type AgentEvent, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { Api, ImageContent, Model } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	convertToLlm,
@@ -14,6 +7,7 @@ import {
 	discoverModels,
 	formatSkillsForPrompt,
 	loadSkillsFromDir,
+	type ModelRegistry,
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
@@ -27,6 +21,7 @@ import { formatUsageSummaryText } from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import { createMomTools } from "./tools/index.js";
 import type { ProfileRuntime } from "./tools/profile.js";
+import type { QuestionRuntime } from "./tools/question.js";
 import type { ReactRuntime } from "./tools/react.js";
 import type {
 	ChannelInfo,
@@ -39,6 +34,20 @@ import type {
 } from "./transport/types.js";
 
 const DEFAULT_MODEL = "anthropic:claude-sonnet-4-5";
+
+function toThinkingLevel(level: string | undefined): ThinkingLevel {
+	switch (level) {
+		case "off":
+		case "minimal":
+		case "low":
+		case "medium":
+		case "high":
+		case "xhigh":
+			return level;
+		default:
+			return "off";
+	}
+}
 
 function runFormatter(script: string, workingDir: string, data: unknown): FormatterOutput | null {
 	const scriptPath = join(workingDir, script);
@@ -66,7 +75,7 @@ function runFormatter(script: string, workingDir: string, data: unknown): Format
 
 let configuredModel: Model<Api> | null = null;
 
-function parseModelArg(modelArg: string): { provider: KnownProvider; modelId: string } {
+function parseModelArg(modelArg: string, knownProviders: Set<string>): { provider: string; modelId: string } {
 	const parts = modelArg.split(":");
 	if (parts.length !== 2 || !parts[0] || !parts[1]) {
 		throw new Error(
@@ -74,12 +83,11 @@ function parseModelArg(modelArg: string): { provider: KnownProvider; modelId: st
 		);
 	}
 
-	const provider = parts[0] as KnownProvider;
+	const provider = parts[0];
 	const modelId = parts[1];
-	const knownProviders = new Set(getProviders());
 	if (!knownProviders.has(provider)) {
 		const available = Array.from(knownProviders).slice(0, 15).join(", ");
-		throw new Error(`Unknown provider: "${parts[0]}". Available providers include: ${available}...`);
+		throw new Error(`Unknown provider: "${provider}". Available providers include: ${available}...`);
 	}
 
 	return { provider, modelId };
@@ -100,16 +108,18 @@ function getWorkspaceModel(workingDir: string): string | undefined {
 	return undefined;
 }
 
-export function initializeModel(modelArg?: string, workingDir?: string): Model<Api> {
+export function initializeModel(modelRegistry: ModelRegistry, modelArg?: string, workingDir?: string): Model<Api> {
 	const workspaceModel = workingDir ? getWorkspaceModel(workingDir) : undefined;
 	const modelStr = modelArg || process.env.MOM_MODEL || workspaceModel || DEFAULT_MODEL;
-	const { provider, modelId } = parseModelArg(modelStr);
 
-	const model = getModels(provider).find((m) => m.id === modelId) as Model<Api> | undefined;
+	const allModels = modelRegistry.getAll();
+	const knownProviders = new Set(allModels.map((m) => m.provider));
+	const { provider, modelId } = parseModelArg(modelStr, knownProviders);
+
+	const model = modelRegistry.find(provider, modelId) as Model<Api> | undefined;
 	if (!model) {
-		const providers = getProviders();
-		const availableModels = providers
-			.flatMap((p) => getModels(p).map((m) => `${p}:${m.id}`))
+		const availableModels = allModels
+			.map((m) => `${m.provider}:${m.id}`)
 			.slice(0, 10)
 			.join(", ");
 		throw new Error(`Unknown model: "${modelStr}". Available models include: ${availableModels}...`);
@@ -463,7 +473,7 @@ Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","i
 	- edit: Surgical file edits
 	- attach: ${toolAttachLabel}
 	- profile: Update bot profile (persists to settings.json).${transport === "discord" ? " Discord: status (online/idle/dnd/invisible), activity (Playing/Watching/etc), avatar (URL or local path), username." : " Slack: username, iconEmoji, iconUrl (per-message overrides, requires chat:write.customize scope)."}
-
+${transport === "discord" ? "\t- question: Ask a multiple-choice question using buttons (returns the selected option)\n" : ""}
 Each tool requires a "label" parameter (shown to user).
 
 ${fileUploadGuide}
@@ -543,6 +553,7 @@ export function getOrCreateRunner(
 	channelDir: string,
 	getProfileRuntime?: () => ProfileRuntime | null,
 	getReactRuntime?: () => ReactRuntime | null,
+	getQuestionRuntime?: () => QuestionRuntime | null,
 ): AgentRunner {
 	const runnerKey = `slack:${channelId}`;
 	const existing = channelRunners.get(runnerKey);
@@ -557,6 +568,7 @@ export function getOrCreateRunner(
 		workingDir,
 		getProfileRuntime,
 		getReactRuntime,
+		getQuestionRuntime,
 	);
 	channelRunners.set(runnerKey, runner);
 	return runner;
@@ -570,6 +582,7 @@ export function getOrCreateRunnerForTransport(
 	workingDir: string,
 	getProfileRuntime?: () => ProfileRuntime | null,
 	getReactRuntime?: () => ReactRuntime | null,
+	getQuestionRuntime?: () => QuestionRuntime | null,
 ): AgentRunner {
 	const existing = channelRunners.get(runnerKey);
 	if (existing) return existing;
@@ -581,6 +594,7 @@ export function getOrCreateRunnerForTransport(
 		workingDir,
 		getProfileRuntime,
 		getReactRuntime,
+		getQuestionRuntime,
 	);
 	channelRunners.set(runnerKey, runner);
 	return runner;
@@ -598,6 +612,7 @@ function createRunner(
 	workingDir: string,
 	getProfileRuntime?: () => ProfileRuntime | null,
 	getReactRuntime?: () => ReactRuntime | null,
+	getQuestionRuntime?: () => QuestionRuntime | null,
 ): AgentRunner {
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(workingDir);
@@ -634,6 +649,7 @@ function createRunner(
 	}
 	const realWorkspaceRoot = realpathSync(workingDir);
 	const tools = createMomTools(
+		transport,
 		executor,
 		() => {
 			const ctx = runState.ctx;
@@ -675,6 +691,7 @@ function createRunner(
 		() => runState.ctx,
 		getProfileRuntime ?? (() => null),
 		getReactRuntime ?? (() => null),
+		getQuestionRuntime ?? (() => null),
 	);
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
@@ -701,9 +718,11 @@ function createRunner(
 	const sessionManager = SessionManager.open(sessionFile, channelDir);
 	const settingsManager = new MomSettingsManager(workingDir);
 
+	const defaultThinkingLevel = toThinkingLevel(settingsManager.getDefaultThinkingLevel());
+
 	if (sessionManager.getEntries().length === 0) {
 		sessionManager.appendModelChange(model.provider, model.id);
-		sessionManager.appendThinkingLevelChange("off");
+		sessionManager.appendThinkingLevelChange(defaultThinkingLevel);
 	}
 
 	// Create agent
@@ -711,7 +730,7 @@ function createRunner(
 		initialState: {
 			systemPrompt,
 			model,
-			thinkingLevel: "off",
+			thinkingLevel: defaultThinkingLevel,
 			tools,
 		},
 		convertToLlm,
@@ -721,6 +740,9 @@ function createRunner(
 
 	// Load existing messages
 	const loadedSession = sessionManager.buildSessionContext();
+	if (loadedSession.thinkingLevel) {
+		agent.setThinkingLevel(toThinkingLevel(loadedSession.thinkingLevel as unknown as string));
+	}
 	if (
 		loadedSession.model &&
 		(loadedSession.model.provider !== model.provider || loadedSession.model.modelId !== model.id)
@@ -894,8 +916,19 @@ function createRunner(
 					}
 				}
 
+				const collapseDetailsOnComplete = ctx.transport === "discord" && settingsManager.collapseDetailsOnComplete;
+				const canSendCollapsedDetails = ctx.showDetails && Boolean(ctx.guildId);
+
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
+
+					if (collapseDetailsOnComplete) {
+						if (canSendCollapsedDetails) {
+							queue.enqueueMessage(ctx.formatting.italic(thinking), "details", "thinking details", false);
+						}
+						continue;
+					}
+
 					queue.enqueueMessage(ctx.formatting.italic(thinking), "response", "thinking response");
 					if (ctx.transport === "slack" && ctx.showDetails) {
 						queue.enqueueMessage(ctx.formatting.italic(thinking), "details", "thinking details", false);
@@ -905,9 +938,16 @@ function createRunner(
 				const text = textParts.join("\n");
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
-					queue.enqueueMessage(text, "response", "text output");
-					if (ctx.duplicateResponseToDetails && ctx.showDetails) {
-						queue.enqueueMessage(text, "details", "response details", false);
+
+					if (collapseDetailsOnComplete) {
+						// Keep the final channel message clean: only include assistant text in the response.
+						// (All tool results/thinking are routed to details.)
+						queue.enqueueMessage(text, "response", "text output");
+					} else {
+						queue.enqueueMessage(text, "response", "text output");
+						if (ctx.duplicateResponseToDetails && ctx.showDetails) {
+							queue.enqueueMessage(text, "details", "response details", false);
+						}
 					}
 				}
 				break;

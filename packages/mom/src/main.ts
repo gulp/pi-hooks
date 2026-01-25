@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { getApiKey } from "@mariozechner/pi-ai";
+import { discoverAuthStorage, discoverModels } from "@mariozechner/pi-coding-agent";
 import type { ChatInputCommandInteraction, ModalSubmitInteraction } from "discord.js";
 import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner, getOrCreateRunnerForTransport, initializeModel } from "./agent.js";
@@ -145,30 +145,26 @@ const workingDir = parsedArgs.workingDir;
 const sandbox = parsedArgs.sandbox;
 const transport = parsedArgs.transport;
 
+// Use the same auth/models config as pi-coding-agent (~/.pi/agent by default)
+const authStorage = discoverAuthStorage();
+const modelRegistry = discoverModels(authStorage);
+
 let initializedModel: ReturnType<typeof initializeModel>;
 try {
-	initializedModel = initializeModel(parsedArgs.model, workingDir);
+	initializedModel = initializeModel(modelRegistry, parsedArgs.model, workingDir);
 } catch (err) {
 	console.error(err instanceof Error ? err.message : String(err));
 	process.exit(1);
 }
 
-// Validate API key for the selected provider
-const apiKey = getApiKey(initializedModel.provider);
+// Validate credentials for the selected provider (auth.json, OAuth, env vars, etc.)
+const apiKey = await authStorage.getApiKey(initializedModel.provider);
 if (!apiKey) {
-	const envVarHint: Record<string, string> = {
-		anthropic: "ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN",
-		openai: "OPENAI_API_KEY",
-		google: "GEMINI_API_KEY",
-		mistral: "MISTRAL_API_KEY",
-		groq: "GROQ_API_KEY",
-		cerebras: "CEREBRAS_API_KEY",
-		xai: "XAI_API_KEY",
-		openrouter: "OPENROUTER_API_KEY",
-		zai: "ZAI_API_KEY",
-	};
-	const hint = envVarHint[initializedModel.provider] || `API key for ${initializedModel.provider}`;
-	console.error(`Missing env: ${hint}`);
+	console.error(
+		`Missing credentials for provider "${initializedModel.provider}". ` +
+			`Configure ~/.pi/agent/auth.json (or set PI_CODING_AGENT_DIR to your config dir), ` +
+			`or set the provider's API key env var. For OAuth providers (e.g. openai-codex), run pi and /login once.`,
+	);
 	process.exit(1);
 }
 
@@ -410,6 +406,9 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 			workingDir,
 			() => ({ updateDiscordProfile: async (updates) => bot.updateProfile(updates) }),
 			() => ({ addReaction: (channelId, messageId, emoji) => bot.addReaction(channelId, messageId, emoji) }),
+			() => ({
+				askQuestion: (params) => bot.askQuestion(params),
+			}),
 		);
 		activeRuns.set(runnerKey, { runner, stopRequested: false });
 
@@ -541,6 +540,9 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 				workingDir,
 				() => ({ updateDiscordProfile: async (updates) => bot.updateProfile(updates) }),
 				() => ({ addReaction: (channelId, messageId, emoji) => bot.addReaction(channelId, messageId, emoji) }),
+				() => ({
+					askQuestion: (params) => bot.askQuestion(params),
+				}),
 			);
 			activeRuns.set(runnerKey, { runner, stopRequested: false });
 

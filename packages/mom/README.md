@@ -150,6 +150,7 @@ Create `settings.json` in your workspace directory to configure per-workspace de
 |---------|------|---------|-------------|
 | `defaultProvider` | string | `"anthropic"` | LLM provider |
 | `defaultModel` | string | `"claude-sonnet-4-5"` | Model ID |
+| `defaultThinkingLevel` | string | `"off"` | Thinking level: `off`, `minimal`, `low`, `medium`, `high` (and `xhigh` for supported models) |
 | `showDetails` | boolean | `true` | Show usage summary and errors in details thread |
 | `showToolResults` | boolean | `true` | Show tool call results in details thread |
 | `allowDMs` | boolean | `false` | Enable direct messages ([docs](docs/dm-authorization.md)) |
