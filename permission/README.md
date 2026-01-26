@@ -256,30 +256,13 @@ Commands containing these patterns require HIGH permission:
 
 ## Installation
 
-1. Copy to extensions directory:
-   ```bash
-   cp -r permission ~/.pi/agent/extensions/
-   ```
-
-2. Install dependencies:
-   ```bash
-   cd ~/.pi/agent/extensions/permission
-   npm install
-   ```
-
-Or add to `~/.pi/agent/settings.json`:
-```json
-{
-  "extensions": ["/absolute/path/to/permission"]
-}
-```
-
-Or use CLI:
+Install the package and enable extensions:
 ```bash
-pi --extension ./permission/
-# or directly
-pi --extension ./permission/permission.ts
+pi install git:github.com/prateekmedia/pi-hooks
+pi config
 ```
+
+Dependencies are installed automatically during `pi install`.
 
 ## File Structure
 

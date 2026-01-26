@@ -11,22 +11,13 @@ Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/pac
 
 ## Setup
 
-Place the `checkpoint/` directory where pi can load it:
-
-- **Project scoped**: `cp -r checkpoint .pi/extensions/`
-- **Global**: `cp -r checkpoint ~/.pi/agent/extensions/`
-
-Or add to `~/.pi/agent/settings.json`:
-```json
-{
-  "extensions": ["/absolute/path/to/checkpoint"]
-}
-```
-
-Or use CLI:
+Install the package and enable the extension:
 ```bash
-pi --extension ./checkpoint/
+pi install git:github.com/prateekmedia/pi-hooks
+pi config
 ```
+
+Enable `checkpoint` in `pi config`. Dependencies are installed automatically during `pi install`.
 
 ## File structure
 

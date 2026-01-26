@@ -4,30 +4,18 @@ Minimal reference extensions for [`pi-coding-agent`](https://www.npmjs.com/packa
 
 ## Quick Setup
 
-### Option A: Local paths
-
-Add to `~/.pi/agent/settings.json`:
-```json
-{
-  "extensions": [
-    "/path/to/pi-hooks/checkpoint",
-    "/path/to/pi-hooks/lsp",
-    "/path/to/pi-hooks/permission",
-    "/path/to/pi-hooks/ralph-loop"
-  ]
-}
-```
-
-Then run `npm install` in `lsp/` and `permission/` directories.
-
-### Option B: Install as a pi package (git)
-
+Install the package:
 ```bash
 pi install git:github.com/prateekmedia/pi-hooks
 pi config  # enable/disable extensions
 ```
 
-After install, run `npm install` in the `lsp/` and `permission/` folders inside the installed package path (typically under `~/.pi/agent/git/`).
+Dependencies are installed automatically during `pi install`.
+
+To pull updates later:
+```bash
+pi update git:github.com/prateekmedia/pi-hooks
+```
 
 ## Included Extensions
 
@@ -61,15 +49,7 @@ The package exports two extensions via `package.json`:
 - Definitions, references, hover, symbols, diagnostics, signatures
 - Query by symbol name or line/column position
 
-You can load them individually or together:
-```bash
-# Load both (recommended)
-pi --extension ./lsp/
-
-# Load individually
-pi --extension ./lsp/lsp.ts        # Just auto-diagnostics hook
-pi --extension ./lsp/lsp-tool.ts   # Just the LSP tool
-```
+Both hook and tool are included in the package. Use `pi config` to enable or disable each entry.
 
 <img src="assets/lsp-screenshot.png" alt="LSP Extension" width="500">
 
@@ -107,51 +87,22 @@ Example prompt: "Use ralph loop to check the current time five times, sleeping 1
 
 ## Usage
 
-1. Install dependencies for extensions that need them:
+1. Install the package and enable extensions:
    ```bash
-   cd lsp && npm install
-   cd ../permission && npm install
+   pi install git:github.com/prateekmedia/pi-hooks
+   pi config
    ```
 
-2. **Project-scoped setup** (`.pi/extensions/`):
-   ```bash
-   mkdir -p .pi/extensions
-   cp -r checkpoint .pi/extensions/
-   cp -r lsp .pi/extensions/
-   cp -r permission .pi/extensions/
-   cp -r ralph-loop .pi/extensions/
-   ```
-   pi automatically loads extensions from `.pi/extensions/`.
-
-3. **Global setup** (`~/.pi/agent/extensions/`):
-   ```bash
-   mkdir -p ~/.pi/agent/extensions
-   cp -r checkpoint ~/.pi/agent/extensions/
-   cp -r lsp ~/.pi/agent/extensions/
-   cp -r permission ~/.pi/agent/extensions/
-   cp -r ralph-loop ~/.pi/agent/extensions/
-   ```
-   
-   Or via `~/.pi/agent/settings.json`:
-   ```json
-   {
-     "extensions": [
-       "/absolute/path/to/pi-hooks/checkpoint",
-       "/absolute/path/to/pi-hooks/lsp",
-       "/absolute/path/to/pi-hooks/permission",
-       "/absolute/path/to/pi-hooks/ralph-loop"
-     ]
-   }
-   ```
-
-4. See inline comments in each extension for configuration options.
+2. See inline comments in each extension for configuration options.
 
 ## Testing
 
 ```bash
-cd checkpoint && npm test
-cd lsp && npm run test:all
-cd permission && npm test
+cd lsp && npm install
+cd ../permission && npm install
+cd ../checkpoint && npm test
+cd ../lsp && npm run test:all
+cd ../permission && npm test
 ```
 
 ## License

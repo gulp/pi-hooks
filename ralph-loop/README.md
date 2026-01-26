@@ -2,23 +2,14 @@
 
 Looped subagent execution via the `ralph_loop` tool.
 
-## Installation (only ralph-loop)
+## Installation (ralph-loop only)
 
-1. Copy the extension folder:
-   ```bash
-   cp -r ralph-loop ~/.pi/agent/extensions/
-   ```
+```bash
+pi install git:github.com/prateekmedia/pi-hooks
+pi config
+```
 
-2. Add only this extension to `~/.pi/agent/settings.json`:
-   ```json
-   {
-     "extensions": [
-       "/absolute/path/to/pi-hooks/ralph-loop"
-     ]
-   }
-   ```
-
-No npm install is required for this extension (pi provides the runtime deps).
+Enable only `ralph-loop` in `pi config`. Dependencies are installed automatically during `pi install`.
 
 ## Features
 

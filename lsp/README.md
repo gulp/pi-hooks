@@ -32,33 +32,13 @@ Language Server Protocol integration for pi-coding-agent.
 
 ### Installation
 
-1. Copy to extensions directory:
-   ```bash
-   cp -r lsp ~/.pi/agent/extensions/
-   ```
-
-2. Install dependencies:
-   ```bash
-   cd ~/.pi/agent/extensions/lsp
-   npm install
-   ```
-
-Or add to global settings (`~/.pi/agent/settings.json`):
-```json
-{
-  "extensions": ["/absolute/path/to/lsp"]
-}
-```
-
-Or use CLI:
+Install the package and enable extensions:
 ```bash
-# Load both hook and tool (recommended)
-pi --extension ./lsp/
-
-# Load individually
-pi --extension ./lsp/lsp.ts        # Just auto-diagnostics hook
-pi --extension ./lsp/lsp-tool.ts   # Just the LSP tool
+pi install git:github.com/prateekmedia/pi-hooks
+pi config
 ```
+
+Dependencies are installed automatically during `pi install`.
 
 ### Prerequisites
 
