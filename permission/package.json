@@ -1,6 +1,6 @@
 {
   "name": "permission",
-  "version": "0.50.0",
+  "version": "1.0.0",
   "description": "Layered permission control extension for pi-coding-agent",
   "type": "module",
   "scripts": {
@@ -15,7 +15,9 @@
   "author": "",
   "license": "MIT",
   "pi": {
-    "extensions": ["./permission.ts"]
+    "extensions": [
+      "./permission.ts"
+    ]
   },
   "dependencies": {
     "shell-quote": "^1.8.3"
