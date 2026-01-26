@@ -13,6 +13,6 @@
   "author": "",
   "license": "MIT",
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./ralph-loop.ts"]
   }
 }

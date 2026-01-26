@@ -11,10 +11,11 @@
   ],
   "pi": {
     "extensions": [
-      "./checkpoint",
-      "./lsp",
-      "./permission",
-      "./ralph-loop"
+      "./checkpoint/checkpoint.ts",
+      "./lsp/lsp.ts",
+      "./lsp/lsp-tool.ts",
+      "./permission/permission.ts",
+      "./ralph-loop/ralph-loop.ts"
     ]
   }
 }
