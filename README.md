@@ -4,6 +4,8 @@ Minimal reference extensions for [`pi-coding-agent`](https://www.npmjs.com/packa
 
 ## Quick Setup
 
+### Option A: Local paths
+
 Add to `~/.pi/agent/settings.json`:
 ```json
 {
@@ -17,6 +19,15 @@ Add to `~/.pi/agent/settings.json`:
 ```
 
 Then run `npm install` in `lsp/` and `permission/` directories.
+
+### Option B: Install as a pi package (git)
+
+```bash
+pi install git:github.com/prateekmedia/pi-hooks
+pi config  # enable/disable extensions
+```
+
+After install, run `npm install` in the `lsp/` and `permission/` folders inside the installed package path (typically under `~/.pi/agent/git/`).
 
 ## Included Extensions
 
