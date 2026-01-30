@@ -172,10 +172,10 @@ function findClosestCheckpointRef(
 
 function isUserEntry(entry: any): boolean | undefined {
   if (!entry) return undefined;
-  const role = entry.role ?? entry.type ?? entry.kind ?? entry.author;
-  if (typeof role === "string") return role === "user";
   const messageRole = entry.message?.role;
   if (typeof messageRole === "string") return messageRole === "user";
+  const role = entry.role ?? entry.kind ?? entry.author;
+  if (typeof role === "string") return role === "user";
   return undefined;
 }
 
