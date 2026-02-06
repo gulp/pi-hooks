@@ -5,7 +5,7 @@ Looped subagent execution via the `ralph_loop` tool.
 ## Installation (ralph-loop only)
 
 ```bash
-pi install npm:ralph-loop-pi@latest
+pi install npm:ralph-loop-pi
 pi config
 ```
 

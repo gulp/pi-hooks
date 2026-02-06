@@ -9,7 +9,7 @@ Shows the average output tokens per second (TPS) in the footer status line.
 Install the package and enable the extension:
 
 ```bash
-pi install npm:token-rate-pi@latest
+pi install npm:token-rate-pi
 pi config
 ```
 

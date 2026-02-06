@@ -19,7 +19,13 @@
       "./token-rate.ts"
     ]
   },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "^0.50.0",
+    "@mariozechner/pi-coding-agent": "^0.50.0"
+  },
   "devDependencies": {
+    "@mariozechner/pi-ai": "^0.50.0",
+    "@mariozechner/pi-coding-agent": "^0.50.0",
     "@types/node": "^25.0.3",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3"

@@ -6,7 +6,7 @@ Minimal reference extensions for [`pi-coding-agent`](https://www.npmjs.com/packa
 
 Install the package:
 ```bash
-pi install npm:pi-hooks@latest
+pi install npm:pi-hooks
 pi config  # enable/disable extensions
 ```
 
@@ -102,7 +102,7 @@ Shows the average output tokens per second (TPS) in the footer status line.
 
 1. Install the package and enable extensions:
    ```bash
-   pi install npm:pi-hooks@latest
+   pi install npm:pi-hooks
    pi config
    ```
 

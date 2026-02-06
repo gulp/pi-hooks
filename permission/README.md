@@ -258,7 +258,7 @@ Commands containing these patterns require HIGH permission:
 
 Install the package and enable extensions:
 ```bash
-pi install npm:permission-pi@latest
+pi install npm:permission-pi
 pi config
 ```
 

@@ -20,6 +20,9 @@
       "./permission.ts"
     ]
   },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.50.0"
+  },
   "dependencies": {
     "shell-quote": "^1.8.3"
   },
