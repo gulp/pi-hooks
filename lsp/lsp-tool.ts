@@ -191,7 +191,7 @@ Actions: definition, references, hover, signature, rename (require file + line/c
 Use bash to find files: find src -name "*.ts" -type f`,
     parameters: LspParams,
 
-    async execute(_toolCallId, params, onUpdate, ctx, signal) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return cancelledToolResult();
       onUpdate?.({ content: [{ type: "text", text: "Working..." }], details: { status: "working" } });
 
