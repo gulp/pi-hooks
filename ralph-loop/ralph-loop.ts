@@ -1557,7 +1557,7 @@ export default function (pi: ExtensionAPI) {
 		].join(" "),
 		parameters: LoopParams,
 
-		async execute(_toolCallId, params, onUpdate, ctx, signal) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
